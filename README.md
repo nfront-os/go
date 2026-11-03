@@ -42,7 +42,7 @@ On 9front (`cd /; tar xzf go-plan9-amd64.tgz`, or the install CD with `GO_OUT`):
 `go` finds its tree as `/$objtype/go` (linked with `runtime.defaultGOROOT`); no `$GOROOT`
 needed. On the live CD `$home` is read-only: `GOCACHE=/tmp/go-build` for the build cache. The first build compiles std in the guest (about two minutes on amd64 under KVM).
 
-## cgo (amd64, 386)
+## cgo (amd64, 386, arm64)
 
 cgo programs are linked by [9front-gcc](../9front-gcc)'s gcc against APE (POSIX C, pthreads)
 into an ELF program, which the gcc port's kernel loads (without cgo: a.out, as before).
@@ -55,7 +55,8 @@ On 9front, with `/amd64/gnu` installed (`bind -b /amd64/gnu/bin /bin`): `go buil
 and builds cgo programs as any. C's errno comes as `syscall.Errno` with APE's numbers
 (`syscall.Errno(C.ENOENT)`). In a cgo program the Go heap is a segment of its own and C's
 malloc has the break (386: the segment at 0x70000000, about 1.7 GB for each); g is in
-APE's `_privates[1]`. 386 cross: `i686-pc-plan9-gcc`, `GOARCH=386`.
+APE's `_privates[1]`. 386 cross: `i686-pc-plan9-gcc`, `GOARCH=386`; arm64: `aarch64-pc-plan9-gcc`, the segment at 8 GB
+(9front's arm64 user space is 32 GB).
 
 ## Tests
 

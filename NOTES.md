@@ -130,3 +130,28 @@ Nutzerwunsch: cgo mit einplanen; amd64 zuerst. Go hatte auf Plan 9 nie cgo.
   hätte C bei ~1 GB aufgehört).
 - **Ergebnis**: `tests/cgo/run.sh` 6/6 auf 386 und amd64, `native.sh` 6/6 auf 386 (go und gcc im
   Gast, 9front-gccs out-gcc/386); ohne cgo run.sh 386 10/10.
+
+## Teil 5 (2026-11-03): cgo auf arm64; Notes und Ende mit Threads von C
+
+- **arm64**: g liegt in R28; C sichert R28 (callee-saved), darf es aber zwischendurch benutzen.
+  `load_g`/`save_g` für plan9 (tls_arm64.s) halten g in einem cgo-Programm zusätzlich in APEs
+  `_privates[1]` (`-8(_goprivates)`, wie amd64); `sigtramp` lädt es dort (eine Note mitten in C).
+  `_goprivates` jetzt auch in rt0_plan9_arm64.s. `main` gibt es in asm_arm64.s schon.
+- **Adressraum arm64**: 9fronts Nutzerraum ist nur 32 GB (EVASHIFT 36), ein Segment höchstens 8 GB
+  (SEGMAPSIZE 8192): `heapSegBase` 8 GB (vorher 16 TB — außerhalb).
+- **cmd/go** überschrieb `bin/plan9_arm64/go` nicht („not an object file“): es kannte die a.out-
+  Magic von arm64 nicht (0x00008c47); ebenso `debug/plan9obj` (unexportiert, keine API-Änderung).
+- **Notes auf Threads von C** (Hinweis eines Nebenagenten): ein reiner C-Thread hat kein g,
+  `sigtramp` rief `badsignal2`, der Thread endete — bei jeder Note an die Note-Gruppe (Entf).
+  Jetzt `badnote`: in einem cgo-Programm eine eigene Falle („sys: …“) mit dem Standard (der Proc
+  stirbt wie in C), jede andere Note NCONT (Gos Threads bekommen Gruppen-Notes selbst).
+- **Ende**: Gos `exit` schickt „go: exit“ nur an seine Ms; C-Threads liefen nach dem Ende von
+  main weiter. Jetzt ruft exit in einem cgo-Programm APEs `__pthread_killothers` (neu, gcc-Branch;
+  proc(3) ctl „kill“ für jeden pthread). Gegenprobe ohne: ein Proc blieb.
+- **Rennen beim Ende** (arm64, cgoparallel: ein Proc in Semacquire blieb): (1) exit tötete erst die
+  pthreads und setzte danach `exiting` — ein M dazwischen parkte; jetzt `goexitsall` zuerst.
+  (2) APE: ein Thread steht mit pid 0 in der Liste, bis er läuft; `killothers` übersprang ihn.
+  Jetzt setzt killothers erst `exiting`, ein neuer Thread speichert erst seine pid und liest dann
+  `exiting` (SEQ_CST): einer sieht den anderen.
+- `tests/cgo/cnote.go` (C-Thread übersteht eine Note, Programm endet), run.sh listet übrige Procs.
+- **Ergebnis**: tests/cgo/run.sh 8/8 auf amd64, 386 und arm64.
