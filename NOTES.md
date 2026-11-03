@@ -74,3 +74,8 @@ pthreads von APE.
   auf plan9 übersprungen (WriteMsgUDP gibt es nicht).
 - **Ergebnis amd64** (`go test -short`): errors strings strconv sort fmt os time sync net ok.
   arm64 vor den Fixes: dieselben Fehler wie amd64, also kein Fehler des arm64-Ports.
+- **Vierter Fehler in 9front** (gcc-Branch, Patch 0021): ext4srv starb, wenn ein offenes
+  Verzeichnis nach dem Leeren/Löschen weitergelesen wurde (Gos os-Tests auf arm64:
+  `fault read addr=0x6`). `tests/prog/dirremove.go` zeigt es auch auf amd64 (stürzte sofort
+  ab, jetzt Ende des Verzeichnisses; die Einträge danach kommen aus Gos 64-KB-Puffer, keiner
+  existiert noch). `tests/run.sh` legt /tmp dafür auf eine ext4-Platte.

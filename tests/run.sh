@@ -26,7 +26,9 @@ for p in "${progs[@]}"; do
 	*)	cmds+=("/tests/$n") ;;
 	esac
 done
-log=$(objtype=$A SMP=$smp MEM=${MEM:-1024} "$TOP/tests/guest.sh" "${progs[@]}" -- "${cmds[@]}" 2>&1 | tee /dev/stderr)
+# /tmp on an ext4 disk (tests/guest.sh -D): files.go and dirremove.go use ext4srv
+mkdir -p "$TOP/build/empty"
+log=$(objtype=$A SMP=$smp MEM=${MEM:-1024} "$TOP/tests/guest.sh" -D "/n/empty=$TOP/build/empty" "${progs[@]}" -- "${cmds[@]}" 2>&1 | tee /dev/stderr)
 pass=0 fail=0
 for p in "${progs[@]}"; do
 	n=$(basename "$p")
