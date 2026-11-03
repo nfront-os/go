@@ -42,10 +42,26 @@ On 9front (`cd /; tar xzf go-plan9-amd64.tgz`, or the install CD with `GO_OUT`):
 `go` finds its tree as `/$objtype/go` (linked with `runtime.defaultGOROOT`); no `$GOROOT`
 needed. On the live CD `$home` is read-only: `GOCACHE=/tmp/go-build` for the build cache. The first build compiles std in the guest (about two minutes on amd64 under KVM).
 
+## cgo (amd64)
+
+cgo programs are linked by [9front-gcc](../9front-gcc)'s gcc against APE (POSIX C, pthreads)
+into an ELF program, which the gcc port's kernel loads (without cgo: a.out, as before).
+Cross:
+
+    PATH=../9front-gcc/build-gcc/amd64/cross/bin:$PATH \
+    CGO_ENABLED=1 CC=x86_64-pc-plan9-gcc GOOS=plan9 GOARCH=amd64 go/bin/go build prog.go
+
+On 9front, with `/amd64/gnu` installed (`bind -b /amd64/gnu/bin /bin`): `go build` finds gcc
+and builds cgo programs as any. C's errno comes as `syscall.Errno` with APE's numbers
+(`syscall.Errno(C.ENOENT)`). In a cgo program the Go heap is a segment of its own and C's
+malloc has the break; g is in APE's `_privates[1]`.
+
 ## Tests
 
     objtype=amd64 tests/run.sh          # 7 programs: goroutines, timers, files/exec, TCP, notes, panic
     objtype=arm64 tests/toolchain.sh    # the toolchain in the guest
+    tests/cgo/run.sh                    # cgo, cross-built: C calls Go, C threads in Go, notes, errno
+    tests/cgo/native.sh                 # the same, built by go and gcc in the guest
 
 To put the tree on the install CD: `GO_OUT=../9front-go/out/amd64` for
 `../9front-gccwt`'s `scripts/guest/mkiso.sh`; its `tests/run.sh go` checks Go on that CD.

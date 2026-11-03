@@ -82,3 +82,38 @@ pthreads von APE.
 - **Falle arm64**: nach jedem Build mit `ARCH=arm64` ist `9qemu` neuer als `9qemu.u`, und
   `boot-cli.sh` bootet absichtlich nicht (alter Kernel). Erst `scripts/guest/build-boot.sh`.
   run.sh und toolchain.sh sagen jetzt, wenn der Gast nicht hochkam (vorher nur „0/14“).
+
+## Teil 3 (2026-11-03): cgo auf amd64
+
+Nutzerwunsch: cgo mit einplanen; amd64 zuerst. Go hatte auf Plan 9 nie cgo.
+- **Linken**: cgo verlangt auf plan9 externes Linken (`internal/platform.MustLinkExternal`);
+  `cmd/link` schreibt dann ein ELF-Objekt (Elfinit nach `determineLinkMode`, asmbElf statt
+  asmbPlan9), 9front-gccs gcc linkt mit `plan9.ld` und APE ein ELF. Start: APEs `_main` →
+  `_callmain` → libgccs `__wrap_main` → `__plan9_mainstack` (main auf 16 MB Heap-Stack) →
+  Gos `main` (asm_amd64.s) → `rt0_go`.
+- **TLS**: Gos TLS-Zeiger hieß `_privates`; das ist in einem cgo-Programm APEs Feld und Slot 0
+  gehört dem pthread. Jetzt `_goprivates` (asm6, rt0_plan9_*.s); `gcc_plan9.c` setzt ihn in
+  x_cgo_inittls auf `&_privates[2]` — g liegt bei `-8(_goprivates)` (Tlsoffset), also in Slot 1.
+  Erster Versuch `&_privates[1]` traf Slot 0 (das struct __pthread als g: Absturz in sigtramp).
+  `_goprivates` und `_tos` sind für die C-Seite exportiert (`cgo_export_static`), sonst lokal
+  im go.o (APEs `_tos` wäre ein anderes gewesen).
+- **Heap**: Go und APEs malloc nahmen beide brk ab `end`. In einem cgo-Programm ist Gos Heap ein
+  eigenes Segment (`segattach "memory"` bei `heapSegBase`, 16 TB auf amd64/arm64, 1 GB auf 386;
+  Wachstum mit segbrk), angelegt in osinit, bevor es andere Procs gibt (ein RFMEM-Kind teilt nur
+  die Segmente, die beim fork da waren, aber deren Wachstum).
+- **Fehler im Baum** (gcc-Branch): `plan9.ld` setzte `end` vor Gos `.noptrbss` (verwaiste
+  Sektion) — malloc überschrieb Gos Variablen; APEs pthreads erbten die `_privates` des
+  Erzeugers — ein C-Thread hielt das g seines Erzeugers für seins. Beides behoben.
+- **Runtime**: runtime/cgos POSIX-Teil (pthreads) baut für plan9; `cgoBindM` erlaubt (pthread-
+  Schlüssel mit Destruktor gibt es in APE); `minit` setzt procid für Threads von runtime/cgo.
+- **errno**: cgo liefert `syscall.Errno` (auf plan9 nur ein Platzhalter, „errno N“) mit APEs
+  Zahlen (ENOENT 20).
+- **Build-Cache**: mit einer Release-VERSION (go1.27.3) erkennt cmd/go den Compiler nur an der
+  Version; nach der Umbenennung kamen Objekte des alten Assemblers aus dem Cache („relocation
+  target _privates not defined“). build.sh/install.sh/Tests haben jetzt `build/gocache`, den
+  `HOST=1` leert.
+- **Nativ**: braucht 9front-gccs nativen gcc ohne die alten compat-Header: `out-gcc/$objtype`
+  (30.10.); `out/amd64` (22.10.) hat noch `x86_64-pc-plan9/include/stdlib.h` & co., die mit dem
+  heutigen APE kollidieren (lldiv_t doppelt).
+- **Ergebnis amd64**: `tests/cgo/run.sh` 5/5 (Cross), `tests/cgo/native.sh` 5/5 (go und gcc im
+  Gast); ohne cgo weiter run.sh 10/10 auf amd64 und 386.
