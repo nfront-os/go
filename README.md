@@ -21,7 +21,7 @@ Log of the port (German): `NOTES.md`.
 
 ## Build
 
-    git clone --branch plan9 <this go> go   # or: the go1.27.3 tag and the commits of plan9
+    git clone --depth 1 --branch go1.27.3 https://go.googlesource.com/go go   # then the commits of branch plan9
     objtype=amd64 scripts/build.sh           # 386, arm64: HOST=0 skips the host toolchain
     objtype=amd64 scripts/install.sh
 

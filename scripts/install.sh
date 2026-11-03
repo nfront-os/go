@@ -6,7 +6,8 @@
 #   bin/go, bin/gofmt            cmd/go and gofmt for plan9/$objtype
 #   pkg/tool/plan9_$objtype/     compile, link, asm, vet, ...
 #   pkg/include/                 the assembler's headers
-#   src/, lib/, misc/            the sources of std and cmd (go/'s tracked files)
+#   src/, lib/, misc/            the sources of std and cmd (go/'s tracked files and
+#                                what cmd/dist generated)
 #   VERSION, go.env, LICENSE, PATENTS, README
 # The commands are linked anew here with -trimpath and runtime.defaultGOROOT=/$objtype/go:
 # go finds its tree with no $GOROOT, also when run as /bin/go (bind -b /$objtype/go/bin /bin).
@@ -25,6 +26,10 @@ rm -rf "$D"
 mkdir -p "$D/bin" "$D/pkg/tool/plan9_$A"
 # the sources: go/'s tracked files (no build output)
 (cd "$TOP/go" && git ls-files -z -- src lib misc api go.env VERSION LICENSE PATENTS |
+	tar -c --null -T - -f -) | tar -x -C "$D" -f -
+# and what cmd/dist generated (zversion.go, zbootstrap.go, zdefaultcc.go, the tzdata's
+# zzipdata.go), as Go's own distributions have them
+(cd "$TOP/go" && git ls-files -z -o -i --exclude-standard -- src | grep -z '\.go$' |
 	tar -c --null -T - -f -) | tar -x -C "$D" -f -
 # the assembler's headers (textflag.h, funcdata.h, asm_ppc64x.h), from cmd/dist
 cp -r "$TOP/go/pkg/include" "$D/pkg/"

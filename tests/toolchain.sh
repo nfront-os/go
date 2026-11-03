@@ -11,7 +11,7 @@ D=$TOP/out/$A/$A/go
 PKGS=${PKGS:-errors strings strconv bytes sort unicode/utf8 fmt path/filepath os os/exec time sync net}
 log=$(objtype=$A MEM=${MEM:-2048} GUEST_TIMEOUT=${GUEST_TIMEOUT:-5400} CMDWAIT=${CMDWAIT:-3000} \
 	"$TOP/tests/guest.sh" -D "/$A/go=$D" "$TOP/tests/prog/hello.go" "$TOP/tests/prog/goroutines.go" -- \
-	"ip/ipconfig loopback /dev/null 127.1" \
+	"ip/ipconfig loopback /dev/null 127.1; ip/ipconfig loopback /dev/null ::1 /128" \
 	"bind -b /$A/go/bin /bin" \
 	"cd /tmp; cp /tests/*.go .; go version" \
 	"go run hello.go" \
@@ -26,6 +26,6 @@ check run "hello from Go .* on plan9/$A"
 check build "^ok goroutines"
 check gofmt "gofmt lines +3"
 check vet "^vet ok"
-for p in $PKGS; do check "test $p" "^T ok +$p[[:space:]]"; done
+for p in $PKGS; do check "test $p" "^T ok[[:space:]]+$p[[:space:]]"; done
 echo "$A toolchain: $pass/$((pass+fail)) passed"
 [ $fail = 0 ]

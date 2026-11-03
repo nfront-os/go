@@ -49,3 +49,28 @@ Vorlage plan9/arm (g auch dort im Register).
 **cgo:** geplant (Nutzerwunsch), siehe Plan: externes Linken mit 9front-gccs gcc (ELF wie die
 übrigen gcc-Port-Programme), Start über APEs `_main` → Gos `main`, runtime/cgo über
 pthreads von APE.
+
+## Teil 2 (2026-11-03): Mehrkern, Gos std-Tests im Gast, drei Fehler in 9front
+
+- **Mehrkern** (`tests/prog/parallel.go`, `WANTCPU`): GOMAXPROCS = Prozessoren, CPU-Arbeit auf
+  allen, Atomics, umkämpfter Mutex, Kanal-Pingpong, GC nebenher. 4 Prozessoren: amd64, 386,
+  arm64 bestanden, Speedup 2,5–2,7. arm64 startete bis dahin nur einen Prozessor: der Gast
+  bootete einen alten `9qemu.u` ohne den SMP-Fix des Baums (585787b25); nach `ARCH=arm64` und
+  `scripts/guest/build-boot.sh` dort alle vier. `tests/guest.sh` nimmt jetzt auch auf arm64 4.
+- **install.sh**: auch die von cmd/dist erzeugten, in Git ignorierten Dateien (`zzipdata.go`
+  der tzdata, `zversion.go`, `zbootstrap.go`, `zdefaultcc.go`); ohne zzipdata baute `time`s
+  Test nicht („undefined: zipdata“).
+- **toolchain.sh**: `::1` als Loopback (`ip/ipconfig loopback /dev/null ::1 /128`, ipconfig(8)),
+  Prüfmuster mit Tab nach „ok“.
+- **Fehler in 9front** (im gcc-Branch behoben, Patches 0018–0020 dort):
+  - ext4srv starb bei `go test` (arm64): ein Lesen von 0 Byte ließ den count von Rread
+    uninitialisiert (> msize, lib9p brach ab).
+  - ext4srv: remove und rename ohne Schreibrecht im Elternverzeichnis
+    (`TestRemoveAllButReadOnlyAndPathError`).
+  - TCP-Loopback: Schreiben an eine geschlossene Gegenseite verschwand still
+    (`TestWritevError`); jetzt „i/o on hungup channel“, `tests/prog/tcpclosed.go`.
+- **Go-Tests angepasst** (go/, Branch plan9): `TestOpenError` nimmt 9fronts Form der Fehler
+  (Kernel `namec`: Name hinter dem Fehler); `TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion`
+  auf plan9 übersprungen (WriteMsgUDP gibt es nicht).
+- **Ergebnis amd64** (`go test -short`): errors strings strconv sort fmt os time sync net ok.
+  arm64 vor den Fixes: dieselben Fehler wie amd64, also kein Fehler des arm64-Ports.
