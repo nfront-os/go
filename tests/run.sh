@@ -7,6 +7,7 @@ set -e
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 A=${objtype:-amd64}
 B=$TOP/build/prog-$A
+export GOCACHE=$TOP/build/gocache	# scripts/build.sh's
 rm -rf "$B"; mkdir -p "$B"
 progs=()
 for f in "$TOP"/tests/prog/*.go; do

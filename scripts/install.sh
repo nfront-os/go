@@ -33,7 +33,7 @@ mkdir -p "$D/bin" "$D/pkg/tool/plan9_$A"
 	tar -c --null -T - -f -) | tar -x -C "$D" -f -
 # the assembler's headers (textflag.h, funcdata.h, asm_ppc64x.h), from cmd/dist
 cp -r "$TOP/go/pkg/include" "$D/pkg/"
-export GOOS=plan9 GOARCH=$A CGO_ENABLED=0 GOFLAGS=
+export GOOS=plan9 GOARCH=$A CGO_ENABLED=0 GOFLAGS= GOCACHE=$TOP/build/gocache	# build.sh's
 flags=(-trimpath "-ldflags=-X=runtime.defaultGOROOT=/$A/go")
 cd "$TOP/go/src"
 "$G" build "${flags[@]}" -o "$D/bin/" cmd/go cmd/gofmt

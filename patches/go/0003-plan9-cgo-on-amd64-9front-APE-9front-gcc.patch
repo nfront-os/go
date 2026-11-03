@@ -1,0 +1,597 @@
+From 5e70434dec26e30d9e84ab6b09b8f2631f253924 Mon Sep 17 00:00:00 2001
+From: Stefan Hertenberger <erde74@gmail.com>
+Date: Tue, 3 Nov 2026 22:04:29 +0100
+Subject: [PATCH 3/3] plan9: cgo on amd64 (9front, APE, 9front-gcc)
+
+- cgo on plan9/amd64 (cmd/dist, internal/platform); it always links
+  externally: cmd/link writes an ELF object when it links externally
+  for Plan 9 (lib.go after determineLinkMode, asmb.go), and the host's
+  gcc (9front-gcc's, against APE) makes an ELF program, which the gcc
+  port's kernel loads. Without cgo nothing changes (a.out).
+- The runtime's TLS pointer is _goprivates, not _privates
+  (cmd/internal/obj/x86, rt0_plan9_*.s): in a cgo program APE's start
+  owns _privates and slot 0 is the pthread's; runtime/cgo/gcc_plan9.c
+  points _goprivates at APE's slots so that g is in slot 1. _goprivates
+  and _tos are exported to the C side (runtime/cgo/plan9.go).
+- In a cgo program APE's malloc has the break: the runtime's heap is a
+  segment of its own (segattach "memory" at heapSegBase, grown with
+  segbrk), made in osinit before there is another proc.
+- runtime/cgo's POSIX part (pthreads) builds for plan9; cgoBindM is
+  allowed there; minit sets procid for runtime/cgo's threads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/cmd/dist/build.go              |  2 +-
+ src/cmd/internal/obj/x86/asm6.go   |  6 +++++-
+ src/cmd/link/internal/ld/asmb.go   |  4 ++++
+ src/cmd/link/internal/ld/lib.go    | 10 ++++++++++
+ src/internal/platform/supported.go |  5 +++++
+ src/internal/platform/zosarch.go   |  2 +-
+ src/runtime/cgo/callbacks_unix.go  |  2 +-
+ src/runtime/cgo/gcc_context.c      |  2 +-
+ src/runtime/cgo/gcc_fatalf.c       |  2 +-
+ src/runtime/cgo/gcc_libinit_unix.c |  2 +-
+ src/runtime/cgo/gcc_plan9.c        | 25 +++++++++++++++++++++++++
+ src/runtime/cgo/gcc_setenv.c       |  2 +-
+ src/runtime/cgo/gcc_unix.c         |  2 +-
+ src/runtime/cgo/plan9.go           | 17 +++++++++++++++++
+ src/runtime/cgo/pthread_unix.c     |  2 +-
+ src/runtime/cgo/setenv.go          |  2 +-
+ src/runtime/mem_plan9.go           | 30 +++++++++++++++++++++++++++++-
+ src/runtime/os_plan9.go            |  8 ++++++++
+ src/runtime/os_plan9_386.go        |  9 +++++++++
+ src/runtime/os_plan9_amd64.go      |  9 +++++++++
+ src/runtime/os_plan9_arm.go        |  4 ++++
+ src/runtime/os_plan9_arm64.go      |  4 ++++
+ src/runtime/proc.go                |  3 ++-
+ src/runtime/rt0_plan9_386.s        |  4 ++--
+ src/runtime/rt0_plan9_amd64.s      |  4 ++--
+ src/runtime/sys_plan9_386.s        | 14 ++++++++++++++
+ src/runtime/sys_plan9_amd64.s      | 14 ++++++++++++++
+ src/runtime/sys_plan9_arm.s        | 14 ++++++++++++++
+ src/runtime/sys_plan9_arm64.s      | 14 ++++++++++++++
+ 29 files changed, 201 insertions(+), 17 deletions(-)
+ create mode 100644 src/runtime/cgo/gcc_plan9.c
+ create mode 100644 src/runtime/cgo/plan9.go
+ create mode 100644 src/runtime/os_plan9_386.go
+ create mode 100644 src/runtime/os_plan9_amd64.go
+
+diff --git a/src/cmd/dist/build.go b/src/cmd/dist/build.go
+index cc45644b..b128ff6c 100644
+--- a/src/cmd/dist/build.go
++++ b/src/cmd/dist/build.go
+@@ -1825,7 +1825,7 @@ var cgoEnabled = map[string]bool{
+ 	"openbsd/ppc64":   false,
+ 	"openbsd/riscv64": true,
+ 	"plan9/386":       false,
+-	"plan9/amd64":     false,
++	"plan9/amd64":     true,
+ 	"plan9/arm":       false,
+ 	"plan9/arm64":     false,
+ 	"solaris/amd64":   true,
+diff --git a/src/cmd/internal/obj/x86/asm6.go b/src/cmd/internal/obj/x86/asm6.go
+index 89b64f4e..1e4bfad8 100644
+--- a/src/cmd/internal/obj/x86/asm6.go
++++ b/src/cmd/internal/obj/x86/asm6.go
+@@ -2273,7 +2273,11 @@ func instinit(ctxt *obj.Link) {
+ 		// allowed to access from anywhere. (Would be nice to
+ 		// mark it external, but we don't have a mechanism for
+ 		// that.)
+-		plan9privates = ctxt.Lookup("_privates")
++		// The runtime's own slot pointer, _goprivates, not C's
++		// _privates: in a cgo program APE's _privates[0] is
++		// the pthread's (runtime/cgo sets _goprivates to a slot
++		// of its own; rt0_plan9_*.s without cgo).
++		plan9privates = ctxt.Lookup("_goprivates")
+ 		plan9privates.Set(obj.AttrLinkname, true)
+ 	}
+ 
+diff --git a/src/cmd/link/internal/ld/asmb.go b/src/cmd/link/internal/ld/asmb.go
+index 2088e13b..5e1e2f7a 100644
+--- a/src/cmd/link/internal/ld/asmb.go
++++ b/src/cmd/link/internal/ld/asmb.go
+@@ -95,6 +95,10 @@ func asmb2(ctxt *Link) {
+ 
+ 	// Plan9
+ 	case objabi.Hplan9:
++		if ctxt.IsELF { // cgo: an ELF object (lib.go, after determineLinkMode)
++			asmbElf(ctxt)
++			break
++		}
+ 		asmbPlan9(ctxt)
+ 
+ 	// PE
+diff --git a/src/cmd/link/internal/ld/lib.go b/src/cmd/link/internal/ld/lib.go
+index b9848b23..f57fbbcf 100644
+--- a/src/cmd/link/internal/ld/lib.go
++++ b/src/cmd/link/internal/ld/lib.go
+@@ -584,6 +584,16 @@ func (ctxt *Link) loadlib() {
+ 	// We now have enough information to determine the link mode.
+ 	determineLinkMode(ctxt)
+ 
++	// cgo on Plan 9 (9front): an ELF object for the host's gcc (9front-gcc,
++	// against APE), which links an ELF program; the gcc port's kernel loads
++	// it. Without cgo the internal linker writes a.out (archinit's setup).
++	if ctxt.HeadType == objabi.Hplan9 && ctxt.LinkMode == LinkExternal {
++		Elfinit(ctxt)
++		HEADR = ELFRESERVE
++		*FlagRound = 4096
++		*FlagTextAddr = Rnd(1<<22, *FlagRound) + int64(HEADR)
++	}
++
+ 	if ctxt.LinkMode == LinkExternal && !iscgo && !(buildcfg.GOOS == "darwin" && ctxt.BuildMode != BuildModePlugin && ctxt.Arch.Family == sys.AMD64) {
+ 		// This indicates a user requested -linkmode=external.
+ 		// The startup code uses an import of runtime/cgo to decide
+diff --git a/src/internal/platform/supported.go b/src/internal/platform/supported.go
+index 6f37e368..42af0a0b 100644
+--- a/src/internal/platform/supported.go
++++ b/src/internal/platform/supported.go
+@@ -105,6 +105,11 @@ func MustLinkExternal(goos, goarch string, withCgo bool) bool {
+ 			// set up by the dynamic linker, so internal cgo linking
+ 			// doesn't work. Test case is "go test runtime/cgo".
+ 			return true
++		case "plan9":
++			// cgo programs are ELF, linked by the host's gcc
++			// (9front-gcc's, against APE); the internal linker
++			// writes Plan 9 a.out only.
++			return true
+ 		}
+ 	}
+ 
+diff --git a/src/internal/platform/zosarch.go b/src/internal/platform/zosarch.go
+index 1e3ff79d..387ea4d8 100644
+--- a/src/internal/platform/zosarch.go
++++ b/src/internal/platform/zosarch.go
+@@ -103,7 +103,7 @@ var distInfo = map[OSArch]osArchInfo{
+ 	{"openbsd", "ppc64"}:   {},
+ 	{"openbsd", "riscv64"}: {CgoSupported: true},
+ 	{"plan9", "386"}:       {},
+-	{"plan9", "amd64"}:     {},
++	{"plan9", "amd64"}:     {CgoSupported: true},
+ 	{"plan9", "arm"}:       {},
+ 	{"plan9", "arm64"}:     {},
+ 	{"solaris", "amd64"}:   {CgoSupported: true},
+diff --git a/src/runtime/cgo/callbacks_unix.go b/src/runtime/cgo/callbacks_unix.go
+index 311f549e..ee0990b0 100644
+--- a/src/runtime/cgo/callbacks_unix.go
++++ b/src/runtime/cgo/callbacks_unix.go
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ package cgo
+ 
+diff --git a/src/runtime/cgo/gcc_context.c b/src/runtime/cgo/gcc_context.c
+index b647c99a..6ca36df7 100644
+--- a/src/runtime/cgo/gcc_context.c
++++ b/src/runtime/cgo/gcc_context.c
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix || windows
++//go:build unix || windows || plan9
+ 
+ #include "libcgo.h"
+ 
+diff --git a/src/runtime/cgo/gcc_fatalf.c b/src/runtime/cgo/gcc_fatalf.c
+index 2754414f..f79b8cc8 100644
+--- a/src/runtime/cgo/gcc_fatalf.c
++++ b/src/runtime/cgo/gcc_fatalf.c
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ #include <stdarg.h>
+ #ifdef __ANDROID__
+diff --git a/src/runtime/cgo/gcc_libinit_unix.c b/src/runtime/cgo/gcc_libinit_unix.c
+index 8024fa8d..0ca180cb 100644
+--- a/src/runtime/cgo/gcc_libinit_unix.c
++++ b/src/runtime/cgo/gcc_libinit_unix.c
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ // When cross-compiling with clang to linux/armv5, atomics are emulated
+ // and cause a compiler warning. This results in a build failure since
+diff --git a/src/runtime/cgo/gcc_plan9.c b/src/runtime/cgo/gcc_plan9.c
+new file mode 100644
+index 00000000..531d3e55
+--- /dev/null
++++ b/src/runtime/cgo/gcc_plan9.c
+@@ -0,0 +1,25 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build plan9
++
++#include "libcgo.h"
++
++// Plan 9 has no TLS: a proc's private data are slots at a fixed address
++// in its stack segment, which every proc (rfork(RFMEM)) has a copy of.
++// The runtime keeps g in the word before the one _goprivates points at
++// (the assembler's TLS on plan9 is -8(_goprivates) on amd64; rt0_plan9_*.s
++// sets it for a program without cgo). In a cgo program APE's start
++// (_callmain) owns the slots: _privates, slot 0 is the pthread's (APE's
++// gnu/pthread.c), slot 1 the runtime's; a new thread's slots are empty.
++extern void **_privates;
++extern void **_goprivates;
++
++static void
++inittls(void **tlsg, void **tlsbase)
++{
++	_goprivates = &_privates[2];	/* g in _privates[1] */
++}
++
++void (*x_cgo_inittls)(void **tlsg, void **tlsbase) = inittls;
+diff --git a/src/runtime/cgo/gcc_setenv.c b/src/runtime/cgo/gcc_setenv.c
+index 47caa4b0..23a4ee30 100644
+--- a/src/runtime/cgo/gcc_setenv.c
++++ b/src/runtime/cgo/gcc_setenv.c
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ #include "libcgo.h"
+ 
+diff --git a/src/runtime/cgo/gcc_unix.c b/src/runtime/cgo/gcc_unix.c
+index f6066753..5a1b9086 100644
+--- a/src/runtime/cgo/gcc_unix.c
++++ b/src/runtime/cgo/gcc_unix.c
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ #include "libcgo.h"
+ #include "libcgo_unix.h"
+diff --git a/src/runtime/cgo/plan9.go b/src/runtime/cgo/plan9.go
+new file mode 100644
+index 00000000..14ff4a4e
+--- /dev/null
++++ b/src/runtime/cgo/plan9.go
+@@ -0,0 +1,17 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build plan9
++
++package cgo
++
++import _ "unsafe" // for go:linkname
++
++// The runtime's symbols the C side shares (rt0_plan9_*.s): _goprivates,
++// the pointer to the runtime's slot for g, which gcc_plan9.c points into
++// APE's _privates; _tos, which APE's start (main9.S) sets and the runtime
++// reads (the pid in Tos).
++
++//go:cgo_export_static _goprivates
++//go:cgo_export_static _tos
+diff --git a/src/runtime/cgo/pthread_unix.c b/src/runtime/cgo/pthread_unix.c
+index d38045fd..8bfee25f 100644
+--- a/src/runtime/cgo/pthread_unix.c
++++ b/src/runtime/cgo/pthread_unix.c
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ #ifndef _GNU_SOURCE // pthread_getattr_np
+ #define _GNU_SOURCE
+diff --git a/src/runtime/cgo/setenv.go b/src/runtime/cgo/setenv.go
+index 2247cb2b..53fb9146 100644
+--- a/src/runtime/cgo/setenv.go
++++ b/src/runtime/cgo/setenv.go
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build unix
++//go:build unix || plan9
+ 
+ package cgo
+ 
+diff --git a/src/runtime/mem_plan9.go b/src/runtime/mem_plan9.go
+index 9b18a291..bfeabf69 100644
+--- a/src/runtime/mem_plan9.go
++++ b/src/runtime/mem_plan9.go
+@@ -6,12 +6,40 @@ package runtime
+ 
+ import "unsafe"
+ 
++// In a cgo program APE's malloc has the break (it starts at end, as
++// the runtime's would): the runtime's heap is a segment of its own
++// then (segattach "memory" at heapSegBase), which segbrk grows. osinit
++// makes it, before there is another proc: a proc that rfork(RFMEM)
++// makes shares the segments its parent has, and their growth.
++var heapSeg bool
++
++var memoryClass = []byte("memory\x00")
++
++//go:noescape
++func segattach(attr int32, class *byte, va unsafe.Pointer, len uintptr) uintptr
++
++func segbrk(saddr, addr unsafe.Pointer) int32
++
++func initHeapSeg() {
++	base := uintptr(heapSegBase)
++	if segattach(0, &memoryClass[0], unsafe.Pointer(base), physPageSize) != base {
++		throw("runtime: cannot attach the heap segment")
++	}
++	heapSeg = true
++	bloc = base
++	blocMax = base + physPageSize
++}
++
+ func sbrk(n uintptr) unsafe.Pointer {
+ 	// Plan 9 sbrk from /sys/src/libc/9sys/sbrk.c
+ 	bl := bloc
+ 	n = memRound(n)
+ 	if bl+n > blocMax {
+-		if brk_(unsafe.Pointer(bl+n)) < 0 {
++		if heapSeg {
++			if segbrk(unsafe.Pointer(uintptr(heapSegBase)), unsafe.Pointer(bl+n)) < 0 {
++				return nil
++			}
++		} else if brk_(unsafe.Pointer(bl+n)) < 0 {
+ 			return nil
+ 		}
+ 		blocMax = bl + n
+diff --git a/src/runtime/os_plan9.go b/src/runtime/os_plan9.go
+index 85e1ecdb..35206e0f 100644
+--- a/src/runtime/os_plan9.go
++++ b/src/runtime/os_plan9.go
+@@ -213,6 +213,11 @@ func minit() {
+ 	// Mask all SSE floating-point exceptions
+ 	// when running on the 64-bit kernel.
+ 	setfpmasks()
++	// A thread of runtime/cgo (a pthread) did not start in
++	// tstart_plan9, which sets procid from Tos.
++	if iscgo && getg().m.procid == 0 {
++		getg().m.procid = getpid()
++	}
+ }
+ 
+ // Called from dropm to undo the effect of an minit.
+@@ -330,6 +335,9 @@ var (
+ func osinit() {
+ 	physPageSize = getPageSize()
+ 	initBloc()
++	if iscgo {
++		initHeapSeg() // mem_plan9.go
++	}
+ 	numCPUStartup = getCPUCount()
+ 	getg().m.procid = getpid()
+ 
+diff --git a/src/runtime/os_plan9_386.go b/src/runtime/os_plan9_386.go
+new file mode 100644
+index 00000000..de0e62a1
+--- /dev/null
++++ b/src/runtime/os_plan9_386.go
+@@ -0,0 +1,9 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package runtime
++
++// The runtime's heap segment in a cgo program (mem_plan9.go): above
++// what the break (APE's malloc) is likely to reach.
++const heapSegBase = 0x40000000
+diff --git a/src/runtime/os_plan9_amd64.go b/src/runtime/os_plan9_amd64.go
+new file mode 100644
+index 00000000..98814540
+--- /dev/null
++++ b/src/runtime/os_plan9_amd64.go
+@@ -0,0 +1,9 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package runtime
++
++// The runtime's heap segment in a cgo program (mem_plan9.go): above
++// what the break (APE's malloc) is likely to reach.
++const heapSegBase = 0x100000000000
+diff --git a/src/runtime/os_plan9_arm.go b/src/runtime/os_plan9_arm.go
+index cce62293..8ea197b3 100644
+--- a/src/runtime/os_plan9_arm.go
++++ b/src/runtime/os_plan9_arm.go
+@@ -13,3 +13,7 @@ func cputicks() int64 {
+ 	// runtime·nanotime() is a poor approximation of CPU ticks that is enough for the profiler.
+ 	return nanotime()
+ }
++
++// The runtime's heap segment in a cgo program (mem_plan9.go): above
++// what the break (APE's malloc) is likely to reach.
++const heapSegBase = 0x40000000
+diff --git a/src/runtime/os_plan9_arm64.go b/src/runtime/os_plan9_arm64.go
+index 1257674c..6f3a3b27 100644
+--- a/src/runtime/os_plan9_arm64.go
++++ b/src/runtime/os_plan9_arm64.go
+@@ -9,3 +9,7 @@ func cputicks() int64 {
+ 	// runtime·nanotime() is a poor approximation of CPU ticks that is enough for the profiler.
+ 	return nanotime()
+ }
++
++// The runtime's heap segment in a cgo program (mem_plan9.go): above
++// what the break (APE's malloc) is likely to reach.
++const heapSegBase = 0x100000000000
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index b8d4d150..403fc14b 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -2701,13 +2701,14 @@ func dropm() {
+ // since we need to restore g0 in runtime.cgocallback.
+ //
+ // On systems without pthreads, like Windows, bindm shouldn't be used.
++// Plan 9 has them in a cgo program (APE's, runtime/cgo/gcc_plan9.c).
+ //
+ // NOTE: this always runs without a P, so, nowritebarrierrec required.
+ //
+ //go:nosplit
+ //go:nowritebarrierrec
+ func cgoBindM() {
+-	if GOOS == "windows" || GOOS == "plan9" {
++	if GOOS == "windows" {
+ 		fatal("bindm in unexpected GOOS")
+ 	}
+ 	g := getg()
+diff --git a/src/runtime/rt0_plan9_386.s b/src/runtime/rt0_plan9_386.s
+index 64716158..65f34ca3 100644
+--- a/src/runtime/rt0_plan9_386.s
++++ b/src/runtime/rt0_plan9_386.s
+@@ -7,7 +7,7 @@
+ TEXT _rt0_386_plan9(SB),NOSPLIT,$12
+ 	MOVL	AX, _tos(SB)
+ 	LEAL	8(SP), AX
+-	MOVL	AX, _privates(SB)
++	MOVL	AX, _goprivates(SB)
+ 	MOVL	$1, _nprivates(SB)
+ 	CALL	runtime·asminit(SB)
+ 	MOVL	inargc-4(FP), AX
+@@ -17,5 +17,5 @@ TEXT _rt0_386_plan9(SB),NOSPLIT,$12
+ 	JMP	runtime·rt0_go(SB)
+ 
+ GLOBL _tos(SB), NOPTR, $4
+-GLOBL _privates(SB), NOPTR, $4
++GLOBL _goprivates(SB), NOPTR, $4
+ GLOBL _nprivates(SB), NOPTR, $4
+diff --git a/src/runtime/rt0_plan9_amd64.s b/src/runtime/rt0_plan9_amd64.s
+index 6fd493a5..87c8da10 100644
+--- a/src/runtime/rt0_plan9_amd64.s
++++ b/src/runtime/rt0_plan9_amd64.s
+@@ -7,7 +7,7 @@
+ TEXT _rt0_amd64_plan9(SB),NOSPLIT,$24
+ 	MOVQ	AX, _tos(SB)
+ 	LEAQ	16(SP), AX
+-	MOVQ	AX, _privates(SB)
++	MOVQ	AX, _goprivates(SB)
+ 	MOVL	$1, _nprivates(SB)
+ 	MOVL	inargc-8(FP), DI
+ 	LEAQ	inargv+0(FP), SI
+@@ -15,5 +15,5 @@ TEXT _rt0_amd64_plan9(SB),NOSPLIT,$24
+ 	JMP	AX
+ 
+ GLOBL _tos(SB), NOPTR, $8
+-GLOBL _privates(SB), NOPTR, $8
++GLOBL _goprivates(SB), NOPTR, $8
+ GLOBL _nprivates(SB), NOPTR, $4
+diff --git a/src/runtime/sys_plan9_386.s b/src/runtime/sys_plan9_386.s
+index 4eefeaf8..864d6b73 100644
+--- a/src/runtime/sys_plan9_386.s
++++ b/src/runtime/sys_plan9_386.s
+@@ -69,6 +69,20 @@ TEXT runtime·exits(SB),NOSPLIT,$0
+ 	INT     $64
+ 	RET
+ 
++// func segattach(attr int32, class *byte, va unsafe.Pointer, len uintptr) uintptr
++TEXT runtime·segattach(SB),NOSPLIT,$0
++	MOVL	$30, AX
++	INT	$64
++	MOVL	AX, ret+16(FP)
++	RET
++
++// func segbrk(saddr, addr unsafe.Pointer) int32
++TEXT runtime·segbrk(SB),NOSPLIT,$0
++	MOVL	$12, AX
++	INT	$64
++	MOVL	AX, ret+8(FP)
++	RET
++
+ TEXT runtime·brk_(SB),NOSPLIT,$0
+ 	MOVL    $24, AX
+ 	INT     $64
+diff --git a/src/runtime/sys_plan9_amd64.s b/src/runtime/sys_plan9_amd64.s
+index 67cff825..c3b0f7b8 100644
+--- a/src/runtime/sys_plan9_amd64.s
++++ b/src/runtime/sys_plan9_amd64.s
+@@ -69,6 +69,20 @@ TEXT runtime·exits(SB),NOSPLIT,$0
+ 	SYSCALL
+ 	RET
+ 
++// func segattach(attr int32, class *byte, va unsafe.Pointer, len uintptr) uintptr
++TEXT runtime·segattach(SB),NOSPLIT,$0
++	MOVQ	$30, BP
++	SYSCALL
++	MOVQ	AX, ret+32(FP)
++	RET
++
++// func segbrk(saddr, addr unsafe.Pointer) int32
++TEXT runtime·segbrk(SB),NOSPLIT,$0
++	MOVQ	$12, BP
++	SYSCALL
++	MOVL	AX, ret+16(FP)
++	RET
++
+ TEXT runtime·brk_(SB),NOSPLIT,$0
+ 	MOVQ	$24, BP
+ 	SYSCALL
+diff --git a/src/runtime/sys_plan9_arm.s b/src/runtime/sys_plan9_arm.s
+index e1faacec..198a479e 100644
+--- a/src/runtime/sys_plan9_arm.s
++++ b/src/runtime/sys_plan9_arm.s
+@@ -107,6 +107,20 @@ TEXT runtime·exits(SB),NOSPLIT,$0-4
+ 	RET
+ 
+ //func brk_(addr unsafe.Pointer) int32
++//func segattach(attr int32, class *byte, va unsafe.Pointer, len uintptr) uintptr
++TEXT runtime·segattach(SB),NOSPLIT,$0-20
++	MOVW	$SYS_SEGATTACH, R0
++	SWI	$0
++	MOVW	R0, ret+16(FP)
++	RET
++
++//func segbrk(saddr, addr unsafe.Pointer) int32
++TEXT runtime·segbrk(SB),NOSPLIT,$0-12
++	MOVW	$SYS_SEGBRK, R0
++	SWI	$0
++	MOVW	R0, ret+8(FP)
++	RET
++
+ TEXT runtime·brk_(SB),NOSPLIT,$0-8
+ 	MOVW    $SYS_BRK_, R0
+ 	SWI	$0
+diff --git a/src/runtime/sys_plan9_arm64.s b/src/runtime/sys_plan9_arm64.s
+index 9d22f1c6..5100c06b 100644
+--- a/src/runtime/sys_plan9_arm64.s
++++ b/src/runtime/sys_plan9_arm64.s
+@@ -119,6 +119,20 @@ TEXT runtime·exits(SB),NOSPLIT,$0-8
+ 	SVC
+ 	RET
+ 
++//func segattach(attr int32, class *byte, va unsafe.Pointer, len uintptr) uintptr
++TEXT runtime·segattach(SB),NOSPLIT,$0-40
++	MOVD	$SYS_SEGATTACH, R0
++	SVC
++	MOVD	R0, ret+32(FP)
++	RET
++
++//func segbrk(saddr, addr unsafe.Pointer) int32
++TEXT runtime·segbrk(SB),NOSPLIT,$0-20
++	MOVD	$SYS_SEGBRK, R0
++	SVC
++	MOVW	R0, ret+16(FP)
++	RET
++
+ //func brk_(addr unsafe.Pointer) int32
+ TEXT runtime·brk_(SB),NOSPLIT,$0-12
+ 	MOVD	$SYS_BRK_, R0
