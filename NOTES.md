@@ -72,10 +72,13 @@ pthreads von APE.
 - **Go-Tests angepasst** (go/, Branch plan9): `TestOpenError` nimmt 9fronts Form der Fehler
   (Kernel `namec`: Name hinter dem Fehler); `TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion`
   auf plan9 übersprungen (WriteMsgUDP gibt es nicht).
-- **Ergebnis amd64** (`go test -short`): errors strings strconv sort fmt os time sync net ok.
+- **Ergebnis** (`go test -short` errors strings strconv sort fmt os time sync net, toolchain.sh): amd64, 386 und arm64 je 14/14, run.sh je 10/10 mit 4 Prozessoren.
   arm64 vor den Fixes: dieselben Fehler wie amd64, also kein Fehler des arm64-Ports.
 - **Vierter Fehler in 9front** (gcc-Branch, Patch 0021): ext4srv starb, wenn ein offenes
   Verzeichnis nach dem Leeren/Löschen weitergelesen wurde (Gos os-Tests auf arm64:
   `fault read addr=0x6`). `tests/prog/dirremove.go` zeigt es auch auf amd64 (stürzte sofort
   ab, jetzt Ende des Verzeichnisses; die Einträge danach kommen aus Gos 64-KB-Puffer, keiner
   existiert noch). `tests/run.sh` legt /tmp dafür auf eine ext4-Platte.
+- **Falle arm64**: nach jedem Build mit `ARCH=arm64` ist `9qemu` neuer als `9qemu.u`, und
+  `boot-cli.sh` bootet absichtlich nicht (alter Kernel). Erst `scripts/guest/build-boot.sh`.
+  run.sh und toolchain.sh sagen jetzt, wenn der Gast nicht hochkam (vorher nur „0/14“).

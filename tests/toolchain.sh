@@ -19,6 +19,8 @@ log=$(objtype=$A MEM=${MEM:-2048} GUEST_TIMEOUT=${GUEST_TIMEOUT:-5400} CMDWAIT=$
 	"echo 'package main;func main(){println(1)}' > f.go; gofmt f.go | wc -l | sed 's/^ */gofmt lines /'" \
 	"go vet hello.go && echo vet ok" \
 	"go test -short $PKGS >[2=1] | sed 's/^/T /'; echo test status \$status" 2>&1 | tee /dev/stderr)
+# the guest did not come up (boot-cli.sh refused, QEMU failed): say why
+grep -q '^init: starting' <<<"$log" || { echo "$log" | tail -20; echo "$(basename "$0"): the guest did not boot" >&2; exit 1; }
 pass=0 fail=0
 check() { if grep -qE "$2" <<<"$log"; then pass=$((pass+1)); echo "PASS $1"; else fail=$((fail+1)); echo "FAIL $1"; fi; }
 check version "^go version go[0-9.]+ plan9/$A"

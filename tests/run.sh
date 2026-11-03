@@ -29,6 +29,8 @@ done
 # /tmp on an ext4 disk (tests/guest.sh -D): files.go and dirremove.go use ext4srv
 mkdir -p "$TOP/build/empty"
 log=$(objtype=$A SMP=$smp MEM=${MEM:-1024} "$TOP/tests/guest.sh" -D "/n/empty=$TOP/build/empty" "${progs[@]}" -- "${cmds[@]}" 2>&1 | tee /dev/stderr)
+# the guest did not come up (boot-cli.sh refused, QEMU failed): say why
+grep -q '^init: starting' <<<"$log" || { echo "$log" | tail -20; echo "$(basename "$0"): the guest did not boot" >&2; exit 1; }
 pass=0 fail=0
 for p in "${progs[@]}"; do
 	n=$(basename "$p")
