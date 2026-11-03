@@ -154,4 +154,4 @@ Nutzerwunsch: cgo mit einplanen; amd64 zuerst. Go hatte auf Plan 9 nie cgo.
   Jetzt setzt killothers erst `exiting`, ein neuer Thread speichert erst seine pid und liest dann
   `exiting` (SEQ_CST): einer sieht den anderen.
 - `tests/cgo/cnote.go` (C-Thread übersteht eine Note, Programm endet), run.sh listet übrige Procs.
-- **Ergebnis**: tests/cgo/run.sh 8/8 auf amd64, 386 und arm64.
+- **Ergebnis**: tests/cgo/run.sh 8/8 auf amd64, 386 und arm64 (arm64 dreimal hintereinander); native.sh 7/7 auf arm64 (go und gcc im Gast, 9front-gccs out-gcc/arm64).
