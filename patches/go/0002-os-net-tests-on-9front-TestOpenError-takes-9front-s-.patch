@@ -1,0 +1,45 @@
+From e8bd42b02a8d90b11e7fe5e8a0806cb375d6b741 Mon Sep 17 00:00:00 2001
+From: Stefan Hertenberger <erde74@gmail.com>
+Date: Tue, 3 Nov 2026 19:02:46 +0100
+Subject: [PATCH 2/2] os, net tests on 9front: TestOpenError takes 9front's
+ form of errors (the kernel puts the name after the error: "file does not
+ exist: '/x'"); TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion skipped on
+ plan9 (WriteMsgUDP not supported; it ran only with ::1 configured)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/net/udpsock_test.go | 4 ++++
+ src/os/os_test.go       | 5 +++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/net/udpsock_test.go b/src/net/udpsock_test.go
+index 1700ebaa..88823051 100644
+--- a/src/net/udpsock_test.go
++++ b/src/net/udpsock_test.go
+@@ -685,6 +685,10 @@ func TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion(t *testing.T) {
+ 		// OpenBSD's IPv6 sockets are always IPv6-only, according to the man page:
+ 		// https://man.openbsd.org/ip6#IPV6_V6ONLY
+ 		t.Skipf("skipping on %v", runtime.GOOS)
++	case "plan9":
++		// WriteMsgUDPAddrPort is not supported on Plan 9; with IPv6
++		// configured (::1) the test runs at all.
++		t.Skipf("skipping on %v: WriteMsgUDP not supported", runtime.GOOS)
+ 	}
+ 
+ 	conn, err := ListenUDP("udp", nil)
+diff --git a/src/os/os_test.go b/src/os/os_test.go
+index 62c85443..492ba49a 100644
+--- a/src/os/os_test.go
++++ b/src/os/os_test.go
+@@ -1920,6 +1920,11 @@ func testOpenError(t *testing.T, dir string, rooted bool) {
+ 		if perr.Err != tt.error {
+ 			if runtime.GOOS == "plan9" {
+ 				syscallErrStr := perr.Err.Error()
++				// 9front's kernel puts the name after the error
++				// ("file does not exist: '/x'"), Plan 9's before it.
++				if i := strings.LastIndex(syscallErrStr, ": '"); i >= 0 && strings.HasSuffix(syscallErrStr, "'") {
++					syscallErrStr = syscallErrStr[:i]
++				}
+ 				expectedErrStr := strings.Replace(tt.error.Error(), "file ", "", 1)
+ 				if !strings.HasSuffix(syscallErrStr, expectedErrStr) {
+ 					// Some Plan 9 file servers incorrectly return

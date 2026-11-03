@@ -1,0 +1,1379 @@
+From 46bd22fddb040fc4c695d13ae371555c81430344 Mon Sep 17 00:00:00 2001
+From: Stefan Hertenberger <erde74@gmail.com>
+Date: Tue, 3 Nov 2026 15:55:34 +0100
+Subject: [PATCH 1/2] plan9/arm64: a port for 9front's arm64 kernel
+
+The OS layer only (the arm64 compiler, assembler and linker are there):
+- cmd/dist, internal/platform: plan9/arm64 a port (no cgo).
+- cmd/link: 9front's arm64 a.out (7l -H2): R_MAGIC with the 64-bit
+  header (40 bytes), text at 0x10000, data on the next 64K boundary
+  (the kernel's R_MAGIC alignment).
+- runtime: rt0, system calls (the number in R0, SVC, the arguments read
+  by the kernel from 8(RSP) on in 8-byte slots), notes (sigtramp on the
+  gsignal stack, noted; sigpanictramp pushes the faulting function's LR
+  as signal_arm64.go's preparePanic does), the Ureg of /arm64/include/ureg.h;
+  g lives in R28 only (no TLS: tls_arm64.h).
+- syscall, cmd/vendor/golang.org/x/sys/plan9: asm and zsyscall for arm64.
+internal/cpu needs nothing: cpu_arm64_other.go reads no system registers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/cmd/dist/build.go                         |   1 +
+ src/cmd/link/internal/arm64/obj.go            |  11 +-
+ .../golang.org/x/sys/plan9/asm_plan9_arm64.s  |  30 ++
+ .../x/sys/plan9/zsyscall_plan9_arm64.go       | 284 +++++++++++++++++
+ src/internal/platform/zosarch.go              |   2 +
+ src/runtime/defs_plan9_arm64.go               | 105 +++++++
+ src/runtime/os_plan9_arm64.go                 |  11 +
+ src/runtime/rt0_plan9_arm64.s                 |  18 ++
+ src/runtime/sys_plan9_arm64.s                 | 297 ++++++++++++++++++
+ src/runtime/tls_arm64.h                       |   7 +
+ src/syscall/asm_plan9_arm64.s                 | 178 +++++++++++
+ src/syscall/zsyscall_plan9_arm64.go           | 284 +++++++++++++++++
+ 12 files changed, 1225 insertions(+), 3 deletions(-)
+ create mode 100644 src/cmd/vendor/golang.org/x/sys/plan9/asm_plan9_arm64.s
+ create mode 100644 src/cmd/vendor/golang.org/x/sys/plan9/zsyscall_plan9_arm64.go
+ create mode 100644 src/runtime/defs_plan9_arm64.go
+ create mode 100644 src/runtime/os_plan9_arm64.go
+ create mode 100644 src/runtime/rt0_plan9_arm64.s
+ create mode 100644 src/runtime/sys_plan9_arm64.s
+ create mode 100644 src/syscall/asm_plan9_arm64.s
+ create mode 100644 src/syscall/zsyscall_plan9_arm64.go
+
+diff --git a/src/cmd/dist/build.go b/src/cmd/dist/build.go
+index 78d55bec..cc45644b 100644
+--- a/src/cmd/dist/build.go
++++ b/src/cmd/dist/build.go
+@@ -1827,6 +1827,7 @@ var cgoEnabled = map[string]bool{
+ 	"plan9/386":       false,
+ 	"plan9/amd64":     false,
+ 	"plan9/arm":       false,
++	"plan9/arm64":     false,
+ 	"solaris/amd64":   true,
+ 	"windows/386":     true,
+ 	"windows/amd64":   true,
+diff --git a/src/cmd/link/internal/arm64/obj.go b/src/cmd/link/internal/arm64/obj.go
+index 3d358155..b7f014a5 100644
+--- a/src/cmd/link/internal/arm64/obj.go
++++ b/src/cmd/link/internal/arm64/obj.go
+@@ -47,6 +47,9 @@ func Init() (*sys.Arch, ld.Arch) {
+ 		Dwarfreglr: dwarfRegLR,
+ 		TrampLimit: 0x7c00000, // 26-bit signed offset * 4, leave room for PLT etc.
+ 
++		Plan9Magic:  uint32(4*28*28 + 7), // R_MAGIC
++		Plan9_64Bit: true,
++
+ 		Adddynrel:        adddynrel,
+ 		Archinit:         archinit,
+ 		Archreloc:        archreloc,
+@@ -85,12 +88,14 @@ func archinit(ctxt *ld.Link) {
+ 		ld.Exitf("unknown -H option: %v", ctxt.HeadType)
+ 
+ 	case objabi.Hplan9: /* plan 9 */
+-		ld.HEADR = 32
++		// 9front's arm64 a.out (7l -H2): the 64-bit header (R_MAGIC),
++		// text at 0x10000, data on the next 64K boundary.
++		ld.HEADR = 32 + 8
+ 		if *ld.FlagRound == -1 {
+-			*ld.FlagRound = 4096
++			*ld.FlagRound = 0x10000
+ 		}
+ 		if *ld.FlagTextAddr == -1 {
+-			*ld.FlagTextAddr = ld.Rnd(4096, *ld.FlagRound) + int64(ld.HEADR)
++			*ld.FlagTextAddr = ld.Rnd(0x10000, *ld.FlagRound) + int64(ld.HEADR)
+ 		}
+ 
+ 	case objabi.Hlinux, /* arm64 elf */
+diff --git a/src/cmd/vendor/golang.org/x/sys/plan9/asm_plan9_arm64.s b/src/cmd/vendor/golang.org/x/sys/plan9/asm_plan9_arm64.s
+new file mode 100644
+index 00000000..29eb06d6
+--- /dev/null
++++ b/src/cmd/vendor/golang.org/x/sys/plan9/asm_plan9_arm64.s
+@@ -0,0 +1,30 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++#include "textflag.h"
++
++//
++// System call support for arm64, Plan 9
++//
++
++// Just jump to package syscall's implementation for all these functions.
++// The runtime may know about them.
++
++TEXT	·Syscall(SB),NOSPLIT,$0-64
++	B	syscall·Syscall(SB)
++
++TEXT	·Syscall6(SB),NOSPLIT,$0-88
++	B	syscall·Syscall6(SB)
++
++TEXT ·RawSyscall(SB),NOSPLIT,$0-56
++	B	syscall·RawSyscall(SB)
++
++TEXT	·RawSyscall6(SB),NOSPLIT,$0-80
++	B	syscall·RawSyscall6(SB)
++
++TEXT ·seek(SB),NOSPLIT,$0-56
++	B	syscall·seek(SB)
++
++TEXT ·exit(SB),NOSPLIT,$0-8
++	B	syscall·exit(SB)
+diff --git a/src/cmd/vendor/golang.org/x/sys/plan9/zsyscall_plan9_arm64.go b/src/cmd/vendor/golang.org/x/sys/plan9/zsyscall_plan9_arm64.go
+new file mode 100644
+index 00000000..2274b884
+--- /dev/null
++++ b/src/cmd/vendor/golang.org/x/sys/plan9/zsyscall_plan9_arm64.go
+@@ -0,0 +1,284 @@
++// go run mksyscall.go -l32 -plan9 -tags plan9,arm64 syscall_plan9.go
++// Code generated by the command above; see README.md. DO NOT EDIT.
++
++//go:build plan9 && arm64
++
++package plan9
++
++import "unsafe"
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func fd2path(fd int, buf []byte) (err error) {
++	var _p0 unsafe.Pointer
++	if len(buf) > 0 {
++		_p0 = unsafe.Pointer(&buf[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_FD2PATH, uintptr(fd), uintptr(_p0), uintptr(len(buf)))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func pipe(p *[2]int32) (err error) {
++	r0, _, e1 := Syscall(SYS_PIPE, uintptr(unsafe.Pointer(p)), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func await(s []byte) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(s) > 0 {
++		_p0 = unsafe.Pointer(&s[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_AWAIT, uintptr(_p0), uintptr(len(s)), 0)
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func open(path string, mode int) (fd int, err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_OPEN, uintptr(unsafe.Pointer(_p0)), uintptr(mode), 0)
++	fd = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func create(path string, mode int, perm uint32) (fd int, err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_CREATE, uintptr(unsafe.Pointer(_p0)), uintptr(mode), uintptr(perm))
++	fd = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func remove(path string) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_REMOVE, uintptr(unsafe.Pointer(_p0)), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func stat(path string, edir []byte) (n int, err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	var _p1 unsafe.Pointer
++	if len(edir) > 0 {
++		_p1 = unsafe.Pointer(&edir[0])
++	} else {
++		_p1 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_STAT, uintptr(unsafe.Pointer(_p0)), uintptr(_p1), uintptr(len(edir)))
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func bind(name string, old string, flag int) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(name)
++	if err != nil {
++		return
++	}
++	var _p1 *byte
++	_p1, err = BytePtrFromString(old)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_BIND, uintptr(unsafe.Pointer(_p0)), uintptr(unsafe.Pointer(_p1)), uintptr(flag))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func mount(fd int, afd int, old string, flag int, aname string) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(old)
++	if err != nil {
++		return
++	}
++	var _p1 *byte
++	_p1, err = BytePtrFromString(aname)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall6(SYS_MOUNT, uintptr(fd), uintptr(afd), uintptr(unsafe.Pointer(_p0)), uintptr(flag), uintptr(unsafe.Pointer(_p1)), 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func wstat(path string, edir []byte) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	var _p1 unsafe.Pointer
++	if len(edir) > 0 {
++		_p1 = unsafe.Pointer(&edir[0])
++	} else {
++		_p1 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_WSTAT, uintptr(unsafe.Pointer(_p0)), uintptr(_p1), uintptr(len(edir)))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func chdir(path string) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_CHDIR, uintptr(unsafe.Pointer(_p0)), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Dup(oldfd int, newfd int) (fd int, err error) {
++	r0, _, e1 := Syscall(SYS_DUP, uintptr(oldfd), uintptr(newfd), 0)
++	fd = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Pread(fd int, p []byte, offset int64) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(p) > 0 {
++		_p0 = unsafe.Pointer(&p[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall6(SYS_PREAD, uintptr(fd), uintptr(_p0), uintptr(len(p)), uintptr(offset), uintptr(offset>>32), 0)
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Pwrite(fd int, p []byte, offset int64) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(p) > 0 {
++		_p0 = unsafe.Pointer(&p[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall6(SYS_PWRITE, uintptr(fd), uintptr(_p0), uintptr(len(p)), uintptr(offset), uintptr(offset>>32), 0)
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Close(fd int) (err error) {
++	r0, _, e1 := Syscall(SYS_CLOSE, uintptr(fd), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Fstat(fd int, edir []byte) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(edir) > 0 {
++		_p0 = unsafe.Pointer(&edir[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_FSTAT, uintptr(fd), uintptr(_p0), uintptr(len(edir)))
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Fwstat(fd int, edir []byte) (err error) {
++	var _p0 unsafe.Pointer
++	if len(edir) > 0 {
++		_p0 = unsafe.Pointer(&edir[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_FWSTAT, uintptr(fd), uintptr(_p0), uintptr(len(edir)))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
+diff --git a/src/internal/platform/zosarch.go b/src/internal/platform/zosarch.go
+index ec6368e8..1e3ff79d 100644
+--- a/src/internal/platform/zosarch.go
++++ b/src/internal/platform/zosarch.go
+@@ -52,6 +52,7 @@ var List = []OSArch{
+ 	{"plan9", "386"},
+ 	{"plan9", "amd64"},
+ 	{"plan9", "arm"},
++	{"plan9", "arm64"},
+ 	{"solaris", "amd64"},
+ 	{"wasip1", "wasm"},
+ 	{"windows", "386"},
+@@ -104,6 +105,7 @@ var distInfo = map[OSArch]osArchInfo{
+ 	{"plan9", "386"}:       {},
+ 	{"plan9", "amd64"}:     {},
+ 	{"plan9", "arm"}:       {},
++	{"plan9", "arm64"}:     {},
+ 	{"solaris", "amd64"}:   {CgoSupported: true},
+ 	{"wasip1", "wasm"}:     {},
+ 	{"windows", "386"}:     {CgoSupported: true, FirstClass: true},
+diff --git a/src/runtime/defs_plan9_arm64.go b/src/runtime/defs_plan9_arm64.go
+new file mode 100644
+index 00000000..e89a2326
+--- /dev/null
++++ b/src/runtime/defs_plan9_arm64.go
+@@ -0,0 +1,105 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package runtime
++
++const _PAGESIZE = 0x1000
++
++// Ureg of 9front's arm64 kernel (/arm64/include/ureg.h).
++type ureg struct {
++	r0   uint64 /* general registers */
++	r1   uint64
++	r2   uint64
++	r3   uint64
++	r4   uint64
++	r5   uint64
++	r6   uint64
++	r7   uint64
++	r8   uint64
++	r9   uint64
++	r10  uint64
++	r11  uint64
++	r12  uint64
++	r13  uint64
++	r14  uint64
++	r15  uint64
++	r16  uint64
++	r17  uint64
++	r18  uint64
++	r19  uint64
++	r20  uint64
++	r21  uint64
++	r22  uint64
++	r23  uint64
++	r24  uint64
++	r25  uint64
++	r26  uint64
++	r27  uint64
++	r28  uint64 /* g */
++	r29  uint64
++	link uint64 /* r30 */
++	sp   uint64
++	pc   uint64 /* interrupted addr */
++	psr  uint64
++	typ  uint64 /* of exception */
++}
++
++type sigctxt struct {
++	u *ureg
++}
++
++//go:nosplit
++//go:nowritebarrierrec
++func (c *sigctxt) pc() uintptr { return uintptr(c.u.pc) }
++
++func (c *sigctxt) sp() uintptr { return uintptr(c.u.sp) }
++func (c *sigctxt) lr() uintptr { return uintptr(c.u.link) }
++
++func (c *sigctxt) setpc(x uintptr) { c.u.pc = uint64(x) }
++func (c *sigctxt) setsp(x uintptr) { c.u.sp = uint64(x) }
++func (c *sigctxt) setlr(x uintptr) { c.u.link = uint64(x) }
++
++// savelr keeps the interrupted LR for sigpanictramp, which pushes it
++// as the faulting function's saved LR.
++func (c *sigctxt) savelr(x uintptr) { c.u.r0 = uint64(x) }
++
++func dumpregs(u *ureg) {
++	print("r0    ", hex(u.r0), "\n")
++	print("r1    ", hex(u.r1), "\n")
++	print("r2    ", hex(u.r2), "\n")
++	print("r3    ", hex(u.r3), "\n")
++	print("r4    ", hex(u.r4), "\n")
++	print("r5    ", hex(u.r5), "\n")
++	print("r6    ", hex(u.r6), "\n")
++	print("r7    ", hex(u.r7), "\n")
++	print("r8    ", hex(u.r8), "\n")
++	print("r9    ", hex(u.r9), "\n")
++	print("r10   ", hex(u.r10), "\n")
++	print("r11   ", hex(u.r11), "\n")
++	print("r12   ", hex(u.r12), "\n")
++	print("r13   ", hex(u.r13), "\n")
++	print("r14   ", hex(u.r14), "\n")
++	print("r15   ", hex(u.r15), "\n")
++	print("r16   ", hex(u.r16), "\n")
++	print("r17   ", hex(u.r17), "\n")
++	print("r18   ", hex(u.r18), "\n")
++	print("r19   ", hex(u.r19), "\n")
++	print("r20   ", hex(u.r20), "\n")
++	print("r21   ", hex(u.r21), "\n")
++	print("r22   ", hex(u.r22), "\n")
++	print("r23   ", hex(u.r23), "\n")
++	print("r24   ", hex(u.r24), "\n")
++	print("r25   ", hex(u.r25), "\n")
++	print("r26   ", hex(u.r26), "\n")
++	print("r27   ", hex(u.r27), "\n")
++	print("g     ", hex(u.r28), "\n")
++	print("r29   ", hex(u.r29), "\n")
++	print("lr    ", hex(u.link), "\n")
++	print("sp    ", hex(u.sp), "\n")
++	print("pc    ", hex(u.pc), "\n")
++	print("psr   ", hex(u.psr), "\n")
++	print("type  ", hex(u.typ), "\n")
++}
++
++func sigpanictramp()
+diff --git a/src/runtime/os_plan9_arm64.go b/src/runtime/os_plan9_arm64.go
+new file mode 100644
+index 00000000..1257674c
+--- /dev/null
++++ b/src/runtime/os_plan9_arm64.go
+@@ -0,0 +1,11 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package runtime
++
++//go:nosplit
++func cputicks() int64 {
++	// runtime·nanotime() is a poor approximation of CPU ticks that is enough for the profiler.
++	return nanotime()
++}
+diff --git a/src/runtime/rt0_plan9_arm64.s b/src/runtime/rt0_plan9_arm64.s
+new file mode 100644
+index 00000000..d9d80ded
+--- /dev/null
++++ b/src/runtime/rt0_plan9_arm64.s
+@@ -0,0 +1,18 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++#include "textflag.h"
++
++// 9front's arm64 kernel starts a program with R0 = its Tos,
++// argc at 0(RSP) and the argv pointers following it.
++TEXT _rt0_arm64_plan9(SB),NOSPLIT|NOFRAME,$0
++	MOVD	R0, _tos(SB)
++	MOVD	0(RSP), R0	// argc
++	ADD	$8, RSP, R1	// argv
++	MOVD	RSP, R2		// a 16-byte aligned stack for rt0_go
++	AND	$~15, R2
++	MOVD	R2, RSP
++	B	runtime·rt0_go(SB)
++
++GLOBL _tos(SB), NOPTR, $8
+diff --git a/src/runtime/sys_plan9_arm64.s b/src/runtime/sys_plan9_arm64.s
+new file mode 100644
+index 00000000..9d22f1c6
+--- /dev/null
++++ b/src/runtime/sys_plan9_arm64.s
+@@ -0,0 +1,297 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++#include "go_asm.h"
++#include "go_tls.h"
++#include "textflag.h"
++
++// from ../syscall/zsysnum_plan9.go
++
++#define SYS_SYSR1       0
++#define SYS_BIND        2
++#define SYS_CHDIR       3
++#define SYS_CLOSE       4
++#define SYS_DUP         5
++#define SYS_ALARM       6
++#define SYS_EXEC        7
++#define SYS_EXITS       8
++#define SYS_FAUTH       10
++#define SYS_SEGBRK      12
++#define SYS_OPEN        14
++#define SYS_OSEEK       16
++#define SYS_SLEEP       17
++#define SYS_RFORK       19
++#define SYS_PIPE        21
++#define SYS_CREATE      22
++#define SYS_FD2PATH     23
++#define SYS_BRK_        24
++#define SYS_REMOVE      25
++#define SYS_NOTIFY      28
++#define SYS_NOTED       29
++#define SYS_SEGATTACH   30
++#define SYS_SEGDETACH   31
++#define SYS_SEGFREE     32
++#define SYS_SEGFLUSH    33
++#define SYS_RENDEZVOUS  34
++#define SYS_UNMOUNT     35
++#define SYS_SEMACQUIRE  37
++#define SYS_SEMRELEASE  38
++#define SYS_SEEK        39
++#define SYS_FVERSION    40
++#define SYS_ERRSTR      41
++#define SYS_STAT        42
++#define SYS_FSTAT       43
++#define SYS_WSTAT       44
++#define SYS_FWSTAT      45
++#define SYS_MOUNT       46
++#define SYS_AWAIT       47
++#define SYS_PREAD       50
++#define SYS_PWRITE      51
++#define SYS_TSEMACQUIRE 52
++#define SYS_NSEC        53
++
++// 9front's arm64 system calls: the number in R0, SVC; the arguments are
++// read from 8(RSP) on, one 8-byte slot each, which is where a function's
++// arguments are (arg+0(FP)) on entry; the result is in R0.
++
++//func open(name *byte, mode, perm int32) int32
++TEXT runtime·open(SB),NOSPLIT,$0-20
++	MOVD	$SYS_OPEN, R0
++	SVC
++	MOVW	R0, ret+16(FP)
++	RET
++
++//func pread(fd int32, buf unsafe.Pointer, nbytes int32, offset int64) int32
++TEXT runtime·pread(SB),NOSPLIT,$0-36
++	MOVD	$SYS_PREAD, R0
++	SVC
++	MOVW	R0, ret+32(FP)
++	RET
++
++//func pwrite(fd int32, buf unsafe.Pointer, nbytes int32, offset int64) int32
++TEXT runtime·pwrite(SB),NOSPLIT,$0-36
++	MOVD	$SYS_PWRITE, R0
++	SVC
++	MOVW	R0, ret+32(FP)
++	RET
++
++//func seek(fd int32, offset int64, whence int32) int64
++// The kernel's seek takes a pointer to the result first.
++TEXT runtime·seek(SB),NOSPLIT,$32-32
++	MOVD	$ret+24(FP), R0
++	MOVW	fd+0(FP), R1
++	MOVD	offset+8(FP), R2
++	MOVW	whence+16(FP), R3
++	MOVD	R0, 8(RSP)
++	MOVD	R1, 16(RSP)
++	MOVD	R2, 24(RSP)
++	MOVD	R3, 32(RSP)
++	MOVD	$SYS_SEEK, R0
++	SVC
++	CMN	$1, R0
++	BNE	2(PC)
++	MOVD	R0, ret+24(FP)
++	RET
++
++//func closefd(fd int32) int32
++TEXT runtime·closefd(SB),NOSPLIT,$0-12
++	MOVD	$SYS_CLOSE, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func dupfd(old, new int32) int32
++// The kernel reads new from the second 8-byte slot.
++TEXT runtime·dupfd(SB),NOSPLIT,$16-12
++	MOVW	old+0(FP), R1
++	MOVW	new+4(FP), R2
++	MOVD	R1, 8(RSP)
++	MOVD	R2, 16(RSP)
++	MOVD	$SYS_DUP, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func exits(msg *byte)
++TEXT runtime·exits(SB),NOSPLIT,$0-8
++	MOVD	$SYS_EXITS, R0
++	SVC
++	RET
++
++//func brk_(addr unsafe.Pointer) int32
++TEXT runtime·brk_(SB),NOSPLIT,$0-12
++	MOVD	$SYS_BRK_, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func sleep(ms int32) int32
++TEXT runtime·sleep(SB),NOSPLIT,$0-12
++	MOVD	$SYS_SLEEP, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func plan9_semacquire(addr *uint32, block int32) int32
++TEXT runtime·plan9_semacquire(SB),NOSPLIT,$0-20
++	MOVD	$SYS_SEMACQUIRE, R0
++	SVC
++	MOVW	R0, ret+16(FP)
++	RET
++
++//func plan9_tsemacquire(addr *uint32, ms int32) int32
++TEXT runtime·plan9_tsemacquire(SB),NOSPLIT,$0-20
++	MOVD	$SYS_TSEMACQUIRE, R0
++	SVC
++	MOVW	R0, ret+16(FP)
++	RET
++
++// func timesplit(u uint64) (sec int64, nsec int32)
++TEXT runtime·timesplit(SB),NOSPLIT,$0-20
++	MOVD	u+0(FP), R0
++	MOVD	$1000000000, R1
++	UDIV	R1, R0, R2		// R2 = u / 1e9
++	MSUB	R1, R0, R2, R3		// R3 = u - R2*1e9
++	MOVD	R2, sec+8(FP)
++	MOVW	R3, nsec+16(FP)
++	RET
++
++//func notify(fn unsafe.Pointer) int32
++TEXT runtime·notify(SB),NOSPLIT,$0-12
++	MOVD	$SYS_NOTIFY, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func noted(mode int32) int32
++TEXT runtime·noted(SB),NOSPLIT,$0-12
++	MOVD	$SYS_NOTED, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func plan9_semrelease(addr *uint32, count int32) int32
++TEXT runtime·plan9_semrelease(SB),NOSPLIT,$0-20
++	MOVD	$SYS_SEMRELEASE, R0
++	SVC
++	MOVW	R0, ret+16(FP)
++	RET
++
++//func rfork(flags int32) int32
++TEXT runtime·rfork(SB),NOSPLIT,$0-12
++	MOVD	$SYS_RFORK, R0
++	SVC
++	MOVW	R0, ret+8(FP)
++	RET
++
++//func tstart_plan9(newm *m)
++TEXT runtime·tstart_plan9(SB),NOSPLIT,$16-8
++	MOVD	newm+0(FP), R1
++	MOVD	m_g0(R1), g
++
++	// Layout new m scheduler stack on os stack.
++	MOVD	RSP, R0
++	MOVD	R0, (g_stack+stack_hi)(g)
++	SUB	$(64*1024), R0
++	MOVD	R0, (g_stack+stack_lo)(g)
++	MOVD	R0, g_stackguard0(g)
++	MOVD	R0, g_stackguard1(g)
++
++	// Initialize procid from TOS struct.
++	MOVD	_tos(SB), R0
++	MOVWU	64(R0), R0
++	MOVD	R0, m_procid(R1)	// save pid as m->procid
++
++	BL	runtime·mstart(SB)
++
++	// Exit the thread.
++	MOVD	$0, R0
++	MOVD	R0, 8(RSP)
++	BL	runtime·exits(SB)
++	B	0(PC)
++
++//func sigtramp(ureg, note unsafe.Pointer)
++// The kernel calls it with R0 = ureg, the arguments at 8(RSP) and 16(RSP)
++// and LR = 0; g (R28) is the interrupted one. It never returns: noted
++// resumes the interrupted context.
++TEXT runtime·sigtramp(SB),NOSPLIT|NOFRAME,$0-16
++	// check that g and m exist
++	CBZ	g, bad
++	MOVD	g_m(g), R1
++	CBZ	R1, bad
++
++	// save args
++	MOVD	ureg+0(FP), R2
++	MOVD	note+8(FP), R3
++
++	// change stack
++	MOVD	m_gsignal(R1), R4
++	MOVD	(g_stack+stack_hi)(R4), R5
++	MOVD	R5, RSP
++
++	// make room for the LR slot, args, retval and g
++	SUB	$48, RSP
++
++	// save g
++	MOVD	g, 40(RSP)
++
++	// sighandler(ureg, note, gp) on m->gsignal
++	MOVD	R2, 8(RSP)
++	MOVD	R3, 16(RSP)
++	MOVD	g, 24(RSP)
++	MOVD	R4, g
++	BL	runtime·sighandler(SB)
++	MOVD	32(RSP), R0	// retval
++
++	// restore g
++	MOVD	40(RSP), g
++
++	// call noted(R0)
++	MOVD	R0, 8(RSP)
++	BL	runtime·noted(SB)
++	B	0(PC)
++bad:
++	BL	runtime·badsignal2(SB)	// will exit
++	B	0(PC)
++
++//func sigpanictramp()
++// sighandler left the faulting function's LR in R0 and the faulting
++// pc in LR: push R0 as that function's saved LR, as signal_arm64.go's
++// preparePanic does, and enter sigpanic.
++TEXT runtime·sigpanictramp(SB),NOSPLIT|NOFRAME,$0-0
++	MOVD.W	R0, -16(RSP)
++	B	runtime·sigpanic<ABIInternal>(SB)
++
++//func setfpmasks()
++// Only used by the 64-bit runtime.
++TEXT runtime·setfpmasks(SB),NOSPLIT,$0
++	RET
++
++#define ERRMAX 128	/* from os_plan9.h */
++
++// func errstr() string
++// Only used by package syscall.
++// Grab error string due to a syscall made
++// in entersyscall mode, without going
++// through the allocator (issue 4994).
++// The result's slots are the system call's arguments (buf, len).
++// See ../syscall/asm_plan9_arm64.s:/·Syscall/
++TEXT runtime·errstr(SB),NOSPLIT,$0-16
++	MOVD	g_m(g), R0
++	MOVD	(m_mOS+mOS_errstr)(R0), R1
++	MOVD	R1, ret_base+0(FP)
++	MOVD	$ERRMAX, R2
++	MOVD	R2, ret_len+8(FP)
++	MOVD	$SYS_ERRSTR, R0
++	SVC
++	MOVD	R1, R2
++loop:
++	MOVBU	0(R2), R0
++	CBZ	R0, done
++	ADD	$1, R2
++	B	loop
++done:
++	SUB	R1, R2
++	MOVD	R2, ret_len+8(FP)
++	RET
+diff --git a/src/runtime/tls_arm64.h b/src/runtime/tls_arm64.h
+index 3aa8c63d..00f6bba8 100644
+--- a/src/runtime/tls_arm64.h
++++ b/src/runtime/tls_arm64.h
+@@ -44,6 +44,13 @@
+ #define MRS_TPIDR_R0 MOVD R18_PLATFORM, R0
+ #endif
+ 
++#ifdef GOOS_plan9
++// Plan 9 has no TLS and no cgo: g is only ever in R28 (load_g and save_g
++// return before this, iscgo being false).
++#define TLSG_IS_VARIABLE
++#define MRS_TPIDR_R0 MOVD ZR, R0
++#endif
++
+ // Define something that will break the build if
+ // the GOOS is unknown.
+ #ifndef MRS_TPIDR_R0
+diff --git a/src/syscall/asm_plan9_arm64.s b/src/syscall/asm_plan9_arm64.s
+new file mode 100644
+index 00000000..ad7bf923
+--- /dev/null
++++ b/src/syscall/asm_plan9_arm64.s
+@@ -0,0 +1,178 @@
++// Copyright 2026 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++#include "textflag.h"
++#include "funcdata.h"
++
++//
++// System call support for Plan 9 on arm64 (9front): the number in R0, SVC;
++// the kernel reads the arguments from 8(RSP) on, one 8-byte slot each, and
++// returns the result in R0.
++//
++
++//func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err string)
++//func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err string)
++//func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2, err uintptr)
++//func RawSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr)
++
++#define SYS_ERRSTR 41	/* from zsysnum_plan9.go */
++#define SYS_SEEK 39	/* from zsysnum_plan9.go */
++
++// The frame of Syscall and Syscall6: the arguments at 8(RSP) (six slots),
++// the error buffer at 64(RSP) (ERRMAX, 128 bytes).
++
++TEXT	·Syscall(SB),NOSPLIT,$192-64
++	NO_LOCAL_POINTERS
++	BL	runtime·entersyscall<ABIInternal>(SB)
++	MOVD	a1+8(FP), R1
++	MOVD	a2+16(FP), R2
++	MOVD	a3+24(FP), R3
++	MOVD	R1, 8(RSP)
++	MOVD	R2, 16(RSP)
++	MOVD	R3, 24(RSP)
++	MOVD	trap+0(FP), R0
++	SVC
++	MOVD	R0, r1+32(FP)
++	MOVD	ZR, r2+40(FP)
++	CMN	$1, R0
++	BNE	ok3
++
++	ADD	$64, RSP, R1
++	MOVD	R1, 8(RSP)
++	MOVD	$128, R2
++	MOVD	R2, 16(RSP)
++	MOVD	$SYS_ERRSTR, R0
++	SVC
++	BL	runtime·exitsyscall(SB) // call via ABI wrapper, ensuring ABIInternal fixed registers are set
++	ADD	$64, RSP, R1
++	MOVD	R1, 8(RSP)
++	BL	runtime·gostring(SB)
++	MOVD	16(RSP), R1
++	MOVD	24(RSP), R2
++	B	copyresult3
++
++ok3:
++	BL	runtime·exitsyscall(SB) // call via ABI wrapper, ensuring ABIInternal fixed registers are set
++	MOVD	$·emptystring(SB), R3
++	MOVD	0(R3), R1
++	MOVD	8(R3), R2
++
++copyresult3:
++	MOVD	R1, err_base+48(FP)
++	MOVD	R2, err_len+56(FP)
++	RET
++
++TEXT	·Syscall6(SB),NOSPLIT,$192-88
++	NO_LOCAL_POINTERS
++	BL	runtime·entersyscall<ABIInternal>(SB)
++	MOVD	a1+8(FP), R1
++	MOVD	a2+16(FP), R2
++	MOVD	a3+24(FP), R3
++	MOVD	a4+32(FP), R4
++	MOVD	a5+40(FP), R5
++	MOVD	a6+48(FP), R6
++	MOVD	R1, 8(RSP)
++	MOVD	R2, 16(RSP)
++	MOVD	R3, 24(RSP)
++	MOVD	R4, 32(RSP)
++	MOVD	R5, 40(RSP)
++	MOVD	R6, 48(RSP)
++	MOVD	trap+0(FP), R0
++	SVC
++	MOVD	R0, r1+56(FP)
++	MOVD	ZR, r2+64(FP)
++	CMN	$1, R0
++	BNE	ok4
++
++	ADD	$64, RSP, R1
++	MOVD	R1, 8(RSP)
++	MOVD	$128, R2
++	MOVD	R2, 16(RSP)
++	MOVD	$SYS_ERRSTR, R0
++	SVC
++	BL	runtime·exitsyscall(SB) // call via ABI wrapper, ensuring ABIInternal fixed registers are set
++	ADD	$64, RSP, R1
++	MOVD	R1, 8(RSP)
++	BL	runtime·gostring(SB)
++	MOVD	16(RSP), R1
++	MOVD	24(RSP), R2
++	B	copyresult4
++
++ok4:
++	BL	runtime·exitsyscall(SB) // call via ABI wrapper, ensuring ABIInternal fixed registers are set
++	MOVD	$·emptystring(SB), R3
++	MOVD	0(R3), R1
++	MOVD	8(R3), R2
++
++copyresult4:
++	MOVD	R1, err_base+72(FP)
++	MOVD	R2, err_len+80(FP)
++	RET
++
++TEXT ·RawSyscall(SB),NOSPLIT,$32-56
++	MOVD	a1+8(FP), R1
++	MOVD	a2+16(FP), R2
++	MOVD	a3+24(FP), R3
++	MOVD	R1, 8(RSP)
++	MOVD	R2, 16(RSP)
++	MOVD	R3, 24(RSP)
++	MOVD	trap+0(FP), R0
++	SVC
++	MOVD	R0, r1+32(FP)
++	MOVD	R0, r2+40(FP)
++	MOVD	R0, err+48(FP)
++	RET
++
++TEXT	·RawSyscall6(SB),NOSPLIT,$48-80
++	MOVD	a1+8(FP), R1
++	MOVD	a2+16(FP), R2
++	MOVD	a3+24(FP), R3
++	MOVD	a4+32(FP), R4
++	MOVD	a5+40(FP), R5
++	MOVD	a6+48(FP), R6
++	MOVD	R1, 8(RSP)
++	MOVD	R2, 16(RSP)
++	MOVD	R3, 24(RSP)
++	MOVD	R4, 32(RSP)
++	MOVD	R5, 40(RSP)
++	MOVD	R6, 48(RSP)
++	MOVD	trap+0(FP), R0
++	SVC
++	MOVD	R0, r1+56(FP)
++	MOVD	R0, r2+64(FP)
++	MOVD	R0, err+72(FP)
++	RET
++
++//func seek(placeholder uintptr, fd int, offset int64, whence int) (newoffset int64, err string)
++// The kernel's seek takes a pointer to the result first (the placeholder's slot).
++TEXT ·seek(SB),NOSPLIT,$48-56
++	NO_LOCAL_POINTERS
++	MOVD	$newoffset+32(FP), R0
++	MOVD	fd+8(FP), R1
++	MOVD	offset+16(FP), R2
++	MOVD	whence+24(FP), R3
++	MOVD	R0, 8(RSP)
++	MOVD	R1, 16(RSP)
++	MOVD	R2, 24(RSP)
++	MOVD	R3, 32(RSP)
++	MOVD	$SYS_SEEK, R0
++	SVC
++	CMN	$1, R0
++	BNE	ok6
++	MOVD	R0, newoffset+32(FP)
++
++	BL	syscall·errstr(SB)
++	MOVD	8(RSP), R1
++	MOVD	16(RSP), R2
++	B	copyresult6
++
++ok6:
++	MOVD	$·emptystring(SB), R3
++	MOVD	0(R3), R1
++	MOVD	8(R3), R2
++
++copyresult6:
++	MOVD	R1, err_base+40(FP)
++	MOVD	R2, err_len+48(FP)
++	RET
+diff --git a/src/syscall/zsyscall_plan9_arm64.go b/src/syscall/zsyscall_plan9_arm64.go
+new file mode 100644
+index 00000000..2be5bd9a
+--- /dev/null
++++ b/src/syscall/zsyscall_plan9_arm64.go
+@@ -0,0 +1,284 @@
++// mksyscall.pl -l32 -plan9 -tags plan9,arm64 syscall_plan9.go
++// Code generated by the command above; DO NOT EDIT.
++
++//go:build plan9 && arm64
++
++package syscall
++
++import "unsafe"
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func fd2path(fd int, buf []byte) (err error) {
++	var _p0 unsafe.Pointer
++	if len(buf) > 0 {
++		_p0 = unsafe.Pointer(&buf[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_FD2PATH, uintptr(fd), uintptr(_p0), uintptr(len(buf)))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func pipe(p *[2]int32) (err error) {
++	r0, _, e1 := Syscall(SYS_PIPE, uintptr(unsafe.Pointer(p)), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func await(s []byte) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(s) > 0 {
++		_p0 = unsafe.Pointer(&s[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_AWAIT, uintptr(_p0), uintptr(len(s)), 0)
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func open(path string, mode int) (fd int, err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_OPEN, uintptr(unsafe.Pointer(_p0)), uintptr(mode), 0)
++	fd = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func create(path string, mode int, perm uint32) (fd int, err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_CREATE, uintptr(unsafe.Pointer(_p0)), uintptr(mode), uintptr(perm))
++	fd = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func remove(path string) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_REMOVE, uintptr(unsafe.Pointer(_p0)), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func stat(path string, edir []byte) (n int, err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	var _p1 unsafe.Pointer
++	if len(edir) > 0 {
++		_p1 = unsafe.Pointer(&edir[0])
++	} else {
++		_p1 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_STAT, uintptr(unsafe.Pointer(_p0)), uintptr(_p1), uintptr(len(edir)))
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func bind(name string, old string, flag int) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(name)
++	if err != nil {
++		return
++	}
++	var _p1 *byte
++	_p1, err = BytePtrFromString(old)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_BIND, uintptr(unsafe.Pointer(_p0)), uintptr(unsafe.Pointer(_p1)), uintptr(flag))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func mount(fd int, afd int, old string, flag int, aname string) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(old)
++	if err != nil {
++		return
++	}
++	var _p1 *byte
++	_p1, err = BytePtrFromString(aname)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall6(SYS_MOUNT, uintptr(fd), uintptr(afd), uintptr(unsafe.Pointer(_p0)), uintptr(flag), uintptr(unsafe.Pointer(_p1)), 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func wstat(path string, edir []byte) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	var _p1 unsafe.Pointer
++	if len(edir) > 0 {
++		_p1 = unsafe.Pointer(&edir[0])
++	} else {
++		_p1 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_WSTAT, uintptr(unsafe.Pointer(_p0)), uintptr(_p1), uintptr(len(edir)))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func chdir(path string) (err error) {
++	var _p0 *byte
++	_p0, err = BytePtrFromString(path)
++	if err != nil {
++		return
++	}
++	r0, _, e1 := Syscall(SYS_CHDIR, uintptr(unsafe.Pointer(_p0)), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Dup(oldfd int, newfd int) (fd int, err error) {
++	r0, _, e1 := Syscall(SYS_DUP, uintptr(oldfd), uintptr(newfd), 0)
++	fd = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Pread(fd int, p []byte, offset int64) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(p) > 0 {
++		_p0 = unsafe.Pointer(&p[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall6(SYS_PREAD, uintptr(fd), uintptr(_p0), uintptr(len(p)), uintptr(offset), uintptr(offset>>32), 0)
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Pwrite(fd int, p []byte, offset int64) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(p) > 0 {
++		_p0 = unsafe.Pointer(&p[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall6(SYS_PWRITE, uintptr(fd), uintptr(_p0), uintptr(len(p)), uintptr(offset), uintptr(offset>>32), 0)
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Close(fd int) (err error) {
++	r0, _, e1 := Syscall(SYS_CLOSE, uintptr(fd), 0, 0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Fstat(fd int, edir []byte) (n int, err error) {
++	var _p0 unsafe.Pointer
++	if len(edir) > 0 {
++		_p0 = unsafe.Pointer(&edir[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_FSTAT, uintptr(fd), uintptr(_p0), uintptr(len(edir)))
++	n = int(r0)
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
++
++// THIS FILE IS GENERATED BY THE COMMAND AT THE TOP; DO NOT EDIT
++
++func Fwstat(fd int, edir []byte) (err error) {
++	var _p0 unsafe.Pointer
++	if len(edir) > 0 {
++		_p0 = unsafe.Pointer(&edir[0])
++	} else {
++		_p0 = unsafe.Pointer(&_zero)
++	}
++	r0, _, e1 := Syscall(SYS_FWSTAT, uintptr(fd), uintptr(_p0), uintptr(len(edir)))
++	if int32(r0) == -1 {
++		err = e1
++	}
++	return
++}
