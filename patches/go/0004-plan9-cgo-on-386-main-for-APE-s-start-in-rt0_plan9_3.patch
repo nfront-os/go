@@ -1,7 +1,7 @@
 From c341536d2376fa433110b154ea3cecd8d5aa79bf Mon Sep 17 00:00:00 2001
 From: Stefan Hertenberger <erde74@gmail.com>
 Date: Tue, 3 Nov 2026 22:33:08 +0100
-Subject: [PATCH 4/4] plan9: cgo on 386 (main for APE's start in
+Subject: [PATCH 4/5] plan9: cgo on 386 (main for APE's start in
  rt0_plan9_386.s; the heap segment at 0x70000000: the break and the runtime
  about 1.7 GB each, a 386 segment has at most 1984 MB)
 

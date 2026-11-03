@@ -26,6 +26,9 @@ for f in "$TOP"/tests/cgo/*.go; do
 	progs+=("$B/$n")
 	cmds+=("/tests/$n")
 done
+# no proc of a program may be left (a thread of C's own after main returned)
+names=$(cd "$B" && ls | tr '\n' '|' | sed 's/|$//')
+cmds+=("sleep 2; ps | grep '$names' | sed 's/^/left /'; echo procs-checked")
 log=$(objtype=$A SMP=${SMP:-4} MEM=${MEM:-1024} "$TOP/tests/guest.sh" "${progs[@]}" -- "${cmds[@]}" 2>&1 | tee /dev/stderr)
 grep -q '^init: starting' <<<"$log" || { echo "$log" | tail -20; echo "cgo/run.sh: the guest did not boot" >&2; exit 1; }
 pass=0 fail=0
@@ -35,5 +38,7 @@ for p in "${progs[@]}"; do
 	! grep -q "^FAIL $n" <<<"$log" || ok=0
 	if [ $ok = 1 ]; then pass=$((pass+1)); echo "PASS $n"; else fail=$((fail+1)); echo "FAIL $n"; fi
 done
+grep '^left ' <<<"$log" || true
+if grep -q '^procs-checked' <<<"$log" && ! grep -q '^left ' <<<"$log"; then pass=$((pass+1)); echo "PASS no procs left"; else fail=$((fail+1)); echo "FAIL procs left after the programs"; fi
 echo "$A cgo: $pass/$((pass+fail)) passed"
 [ $fail = 0 ]

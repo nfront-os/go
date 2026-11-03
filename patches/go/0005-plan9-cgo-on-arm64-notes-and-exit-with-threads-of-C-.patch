@@ -1,0 +1,348 @@
+From 8d0342f16f72533c9d78b612b209020114de26fd Mon Sep 17 00:00:00 2001
+From: Stefan Hertenberger <erde74@gmail.com>
+Date: Tue, 3 Nov 2026 23:14:04 +0100
+Subject: [PATCH 5/5] plan9: cgo on arm64; notes and exit with threads of C's
+ own
+
+- arm64: load_g and save_g for plan9 (tls_arm64.s): with cgo g is also in
+  APE's _privates[1] (C may use R28 between saving and restoring it);
+  sigtramp loads it in a cgo program. The heap segment at 8 GB: 9front's
+  arm64 user space is 32 GB, a segment at most 8 GB.
+- cmd/go, debug/plan9obj: 9front's arm64 a.out magic (cmd/go would not
+  overwrite a plan9/arm64 program it took for no object).
+- A note on a proc without g (a thread of C's own in a cgo program) is
+  left alone (badnote: noted NCONT; a trap of its own the default) instead
+  of ending that thread; the runtime's threads get a note to the note
+  group themselves.
+- exit in a cgo program has APE end its pthreads (x_cgo_exitall):
+  threads of C's own kept running after main returned. goexitsall first,
+  so that an m made meanwhile ends in minit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/cmd/dist/build.go            |  2 +-
+ src/cmd/go/internal/work/exec.go |  1 +
+ src/debug/plan9obj/file.go       |  2 +-
+ src/debug/plan9obj/plan9obj.go   |  4 ++++
+ src/internal/platform/zosarch.go |  2 +-
+ src/runtime/cgo/gcc_plan9.c      | 11 +++++++++++
+ src/runtime/cgo/plan9.go         |  8 ++++++++
+ src/runtime/os_plan9.go          | 31 ++++++++++++++++++++++++++++++-
+ src/runtime/os_plan9_arm64.go    |  8 +++++---
+ src/runtime/rt0_plan9_arm64.s    |  3 +++
+ src/runtime/sys_plan9_386.s      |  9 +++++----
+ src/runtime/sys_plan9_amd64.s    |  9 +++++----
+ src/runtime/sys_plan9_arm64.s    | 15 ++++++++++++---
+ src/runtime/tls_arm64.h          |  4 ++--
+ src/runtime/tls_arm64.s          | 24 ++++++++++++++++++++++++
+ 15 files changed, 113 insertions(+), 20 deletions(-)
+
+diff --git a/src/cmd/dist/build.go b/src/cmd/dist/build.go
+index edd74b9f..e1029af8 100644
+--- a/src/cmd/dist/build.go
++++ b/src/cmd/dist/build.go
+@@ -1827,7 +1827,7 @@ var cgoEnabled = map[string]bool{
+ 	"plan9/386":       true,
+ 	"plan9/amd64":     true,
+ 	"plan9/arm":       false,
+-	"plan9/arm64":     false,
++	"plan9/arm64":     true,
+ 	"solaris/amd64":   true,
+ 	"windows/386":     true,
+ 	"windows/amd64":   true,
+diff --git a/src/cmd/go/internal/work/exec.go b/src/cmd/go/internal/work/exec.go
+index 3ed01c0f..19917b70 100644
+--- a/src/cmd/go/internal/work/exec.go
++++ b/src/cmd/go/internal/work/exec.go
+@@ -2163,6 +2163,7 @@ var objectMagic = [][]byte{
+ 	{0x00, 0x00, 0x01, 0xEB},                  // Plan 9 i386
+ 	{0x00, 0x00, 0x8a, 0x97},                  // Plan 9 amd64
+ 	{0x00, 0x00, 0x06, 0x47},                  // Plan 9 arm
++	{0x00, 0x00, 0x8c, 0x47},                  // Plan 9 arm64 (9front)
+ 	{0x00, 0x61, 0x73, 0x6D},                  // WASM
+ 	{0x01, 0xDF},                              // XCOFF 32bit
+ 	{0x01, 0xF7},                              // XCOFF 64bit
+diff --git a/src/debug/plan9obj/file.go b/src/debug/plan9obj/file.go
+index 0880c3cc..ad17d7d9 100644
+--- a/src/debug/plan9obj/file.go
++++ b/src/debug/plan9obj/file.go
+@@ -130,7 +130,7 @@ func (f *File) Close() error {
+ func parseMagic(magic []byte) (uint32, error) {
+ 	m := binary.BigEndian.Uint32(magic)
+ 	switch m {
+-	case Magic386, MagicAMD64, MagicARM:
++	case Magic386, MagicAMD64, MagicARM, magicARM64:
+ 		return m, nil
+ 	}
+ 	return 0, &formatError{0, "bad magic number", magic}
+diff --git a/src/debug/plan9obj/plan9obj.go b/src/debug/plan9obj/plan9obj.go
+index 7a194514..61ebfb7a 100644
+--- a/src/debug/plan9obj/plan9obj.go
++++ b/src/debug/plan9obj/plan9obj.go
+@@ -34,3 +34,7 @@ const (
+ 	MagicAMD64 = (4*26+0)*26 + 7 + Magic64
+ 	MagicARM   = (4*20+0)*20 + 7
+ )
++
++// magicARM64 is 9front's arm64 a.out (7l), R_MAGIC; unexported, so as not
++// to add to the package's API.
++const magicARM64 = (4*28+0)*28 + 7 + Magic64
+diff --git a/src/internal/platform/zosarch.go b/src/internal/platform/zosarch.go
+index ccf18432..7dd51fbf 100644
+--- a/src/internal/platform/zosarch.go
++++ b/src/internal/platform/zosarch.go
+@@ -105,7 +105,7 @@ var distInfo = map[OSArch]osArchInfo{
+ 	{"plan9", "386"}:       {CgoSupported: true},
+ 	{"plan9", "amd64"}:     {CgoSupported: true},
+ 	{"plan9", "arm"}:       {},
+-	{"plan9", "arm64"}:     {},
++	{"plan9", "arm64"}:     {CgoSupported: true},
+ 	{"solaris", "amd64"}:   {CgoSupported: true},
+ 	{"wasip1", "wasm"}:     {},
+ 	{"windows", "386"}:     {CgoSupported: true, FirstClass: true},
+diff --git a/src/runtime/cgo/gcc_plan9.c b/src/runtime/cgo/gcc_plan9.c
+index 531d3e55..3fffcc2c 100644
+--- a/src/runtime/cgo/gcc_plan9.c
++++ b/src/runtime/cgo/gcc_plan9.c
+@@ -23,3 +23,14 @@ inittls(void **tlsg, void **tlsbase)
+ }
+ 
+ void (*x_cgo_inittls)(void **tlsg, void **tlsbase) = inittls;
++
++// exit (runtime/os_plan9.go): APE's pthreads include threads of C's own,
++// which are not the runtime's ms; APE ends them all but the caller, as its
++// exit does (proc(3)'s ctl "kill").
++extern void __pthread_killothers(void);
++
++void
++x_cgo_exitall(void *dummy)
++{
++	__pthread_killothers();
++}
+diff --git a/src/runtime/cgo/plan9.go b/src/runtime/cgo/plan9.go
+index 14ff4a4e..49edb66d 100644
+--- a/src/runtime/cgo/plan9.go
++++ b/src/runtime/cgo/plan9.go
+@@ -15,3 +15,11 @@ import _ "unsafe" // for go:linkname
+ 
+ //go:cgo_export_static _goprivates
+ //go:cgo_export_static _tos
++
++// exit: APE ends the threads (gcc_plan9.c).
++
++//go:cgo_import_static x_cgo_exitall
++//go:linkname x_cgo_exitall x_cgo_exitall
++//go:linkname _cgo_exitall _cgo_exitall
++var x_cgo_exitall byte
++var _cgo_exitall = &x_cgo_exitall
+diff --git a/src/runtime/os_plan9.go b/src/runtime/os_plan9.go
+index 35206e0f..0a28b68e 100644
+--- a/src/runtime/os_plan9.go
++++ b/src/runtime/os_plan9.go
+@@ -460,7 +460,10 @@ func exit(e int32) {
+ 		// Don't append, rely on the existing data being zero.
+ 		status = sl[:len(sl)+1]
+ 	}
+-	goexitsall(&status[0])
++	goexitsall(&status[0]) // first: sets exiting, a new m ends in minit
++	if iscgo && _cgo_exitall != nil {
++		asmcgocall(_cgo_exitall, nil)
++	}
+ 	exits(&status[0])
+ }
+ 
+@@ -535,6 +538,32 @@ func badsignal2() {
+ 	exits(&_badsignal[0])
+ }
+ 
++// badnote takes a note on a proc the runtime does not know (sigtramp found
++// no g). In a cgo program that is a thread of C's own, which never called
++// Go: a trap of its own ("sys: ...") takes the default (the proc dies, as
++// in a C program); any other note it leaves alone (noted NCONT): one that
++// came to the note group the runtime's threads got as well. Without cgo
++// there is no such proc (badsignal2).
++//
++//go:nosplit
++//go:nowritebarrierrec
++func badnote(note *byte) {
++	if !iscgo {
++		badsignal2()
++	}
++	if *note == 's' && *(*byte)(add(unsafe.Pointer(note), 1)) == 'y' &&
++		*(*byte)(add(unsafe.Pointer(note), 2)) == 's' && *(*byte)(add(unsafe.Pointer(note), 3)) == ':' {
++		noted(_NDFLT)
++	}
++	noted(_NCONT)
++}
++
++// In a cgo program APE's pthreads include threads of C's own, which are not
++// the runtime's ms: exit has APE end them (runtime/cgo's gcc_plan9.c).
++//
++//go:linkname _cgo_exitall _cgo_exitall
++var _cgo_exitall unsafe.Pointer
++
+ func raisebadsignal(sig uint32) {
+ 	badsignal2()
+ }
+diff --git a/src/runtime/os_plan9_arm64.go b/src/runtime/os_plan9_arm64.go
+index 6f3a3b27..90aa311e 100644
+--- a/src/runtime/os_plan9_arm64.go
++++ b/src/runtime/os_plan9_arm64.go
+@@ -10,6 +10,8 @@ func cputicks() int64 {
+ 	return nanotime()
+ }
+ 
+-// The runtime's heap segment in a cgo program (mem_plan9.go): above
+-// what the break (APE's malloc) is likely to reach.
+-const heapSegBase = 0x100000000000
++// The runtime's heap segment in a cgo program (mem_plan9.go). 9front's
++// arm64 user space is 32 GB (EVASHIFT 36), a segment has at most 8 GB
++// (SEGMAPSIZE): from 8 GB the break (APE's malloc) and the runtime each
++// get a segment's most.
++const heapSegBase = 0x200000000
+diff --git a/src/runtime/rt0_plan9_arm64.s b/src/runtime/rt0_plan9_arm64.s
+index d9d80ded..f4275e3c 100644
+--- a/src/runtime/rt0_plan9_arm64.s
++++ b/src/runtime/rt0_plan9_arm64.s
+@@ -16,3 +16,6 @@ TEXT _rt0_arm64_plan9(SB),NOSPLIT|NOFRAME,$0
+ 	B	runtime·rt0_go(SB)
+ 
+ GLOBL _tos(SB), NOPTR, $8
++// the pointer to the runtime's slot for g in a cgo program (tls_arm64.s);
++// set by runtime/cgo, unused without cgo (g is only in R28 then)
++GLOBL _goprivates(SB), NOPTR, $8
+diff --git a/src/runtime/sys_plan9_386.s b/src/runtime/sys_plan9_386.s
+index 864d6b73..b4c037e0 100644
+--- a/src/runtime/sys_plan9_386.s
++++ b/src/runtime/sys_plan9_386.s
+@@ -175,12 +175,13 @@ TEXT runtime·tstart_plan9(SB),NOSPLIT,$4
+ TEXT runtime·sigtramp(SB),NOSPLIT,$0
+ 	get_tls(AX)
+ 
+-	// check that g exists
++	// check that g exists; without one, a proc of C's own in a cgo program
+ 	MOVL	g(AX), BX
+ 	CMPL	BX, $0
+-	JNE	3(PC)
+-	CALL	runtime·badsignal2(SB) // will exit
+-	RET
++	JNE	4(PC)
++	MOVL	note+4(FP), AX
++	MOVL	AX, 0(SP)		// badnote's argument, over the slot below ureg
++	CALL	runtime·badnote(SB)	// does not return
+ 
+ 	// save args
+ 	MOVL	ureg+0(FP), CX
+diff --git a/src/runtime/sys_plan9_amd64.s b/src/runtime/sys_plan9_amd64.s
+index c3b0f7b8..4c741d1a 100644
+--- a/src/runtime/sys_plan9_amd64.s
++++ b/src/runtime/sys_plan9_amd64.s
+@@ -186,12 +186,13 @@ TEXT runtime·settls(SB),NOSPLIT,$0
+ TEXT runtime·sigtramp(SB),NOSPLIT|NOFRAME,$0
+ 	get_tls(AX)
+ 
+-	// check that g exists
++	// check that g exists; without one, a proc of C's own in a cgo program
+ 	MOVQ	g(AX), BX
+ 	CMPQ	BX, $0
+-	JNE	3(PC)
+-	CALL	runtime·badsignal2(SB) // will exit
+-	RET
++	JNE	4(PC)
++	MOVQ	note+8(FP), AX
++	MOVQ	AX, 0(SP)		// badnote's argument, over the slot below ureg
++	CALL	runtime·badnote(SB)	// does not return
+ 
+ 	// save args
+ 	MOVQ	ureg+0(FP), CX
+diff --git a/src/runtime/sys_plan9_arm64.s b/src/runtime/sys_plan9_arm64.s
+index 5100c06b..a097ee26 100644
+--- a/src/runtime/sys_plan9_arm64.s
++++ b/src/runtime/sys_plan9_arm64.s
+@@ -227,9 +227,15 @@ TEXT runtime·tstart_plan9(SB),NOSPLIT,$16-8
+ 
+ //func sigtramp(ureg, note unsafe.Pointer)
+ // The kernel calls it with R0 = ureg, the arguments at 8(RSP) and 16(RSP)
+-// and LR = 0; g (R28) is the interrupted one. It never returns: noted
+-// resumes the interrupted context.
++// and LR = 0; g (R28) is the interrupted one (without cgo). It never
++// returns: noted resumes the interrupted context.
+ TEXT runtime·sigtramp(SB),NOSPLIT|NOFRAME,$0-16
++	// in a cgo program R28 may be C's (between its save and restore of
++	// it): g from its slot (tls_arm64.s; clobbers R0, the args are in FP)
++	MOVB	runtime·iscgo(SB), R1
++	CBZ	R1, 2(PC)
++	BL	runtime·load_g(SB)
++
+ 	// check that g and m exist
+ 	CBZ	g, bad
+ 	MOVD	g_m(g), R1
+@@ -266,7 +272,10 @@ TEXT runtime·sigtramp(SB),NOSPLIT|NOFRAME,$0-16
+ 	BL	runtime·noted(SB)
+ 	B	0(PC)
+ bad:
+-	BL	runtime·badsignal2(SB)	// will exit
++	// no g: a proc of C's own in a cgo program
++	MOVD	note+8(FP), R0
++	MOVD	R0, 8(RSP)		// badnote's argument, over ureg's slot
++	BL	runtime·badnote(SB)	// does not return
+ 	B	0(PC)
+ 
+ //func sigpanictramp()
+diff --git a/src/runtime/tls_arm64.h b/src/runtime/tls_arm64.h
+index 00f6bba8..632f155a 100644
+--- a/src/runtime/tls_arm64.h
++++ b/src/runtime/tls_arm64.h
+@@ -45,8 +45,8 @@
+ #endif
+ 
+ #ifdef GOOS_plan9
+-// Plan 9 has no TLS and no cgo: g is only ever in R28 (load_g and save_g
+-// return before this, iscgo being false).
++// Plan 9 has no TLS register: tls_arm64.s has load_g and save_g of its
++// own (a slot on the stack segment, with cgo); nothing here is used.
+ #define TLSG_IS_VARIABLE
+ #define MRS_TPIDR_R0 MOVD ZR, R0
+ #endif
+diff --git a/src/runtime/tls_arm64.s b/src/runtime/tls_arm64.s
+index 52b3e8f2..01fcf4f5 100644
+--- a/src/runtime/tls_arm64.s
++++ b/src/runtime/tls_arm64.s
+@@ -8,6 +8,28 @@
+ #include "textflag.h"
+ #include "tls_arm64.h"
+ 
++#ifdef GOOS_plan9
++// Plan 9 has no TLS register: a proc's private slots are at a fixed
++// address in its stack segment, of which every proc has a copy. In a cgo
++// program (C may use R28 between saving and restoring it) g is also kept
++// in the word before the one _goprivates points at (runtime/cgo's
++// gcc_plan9.c: APE's _privates[1]). Clobbers R0.
++TEXT runtime·load_g(SB),NOSPLIT,$0
++	MOVB	runtime·iscgo(SB), R0
++	CBZ	R0, nocgo
++	MOVD	_goprivates(SB), R0
++	MOVD	-8(R0), g
++nocgo:
++	RET
++
++TEXT runtime·save_g(SB),NOSPLIT,$0
++	MOVB	runtime·iscgo(SB), R0
++	CBZ	R0, nocgo
++	MOVD	_goprivates(SB), R0
++	MOVD	g, -8(R0)
++nocgo:
++	RET
++#else
+ TEXT runtime·load_g(SB),NOSPLIT,$0
+ #ifndef GOOS_darwin
+ #ifndef GOOS_openbsd
+@@ -50,6 +72,8 @@ TEXT runtime·save_g(SB),NOSPLIT,$0
+ nocgo:
+ 	RET
+ 
++#endif // GOOS_plan9
++
+ #ifdef TLSG_IS_VARIABLE
+ #ifdef GOOS_android
+ // Use the free TLS_SLOT_APP slot #2 on Android Q.
