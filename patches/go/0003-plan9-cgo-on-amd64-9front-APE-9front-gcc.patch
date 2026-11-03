@@ -1,7 +1,7 @@
 From 5e70434dec26e30d9e84ab6b09b8f2631f253924 Mon Sep 17 00:00:00 2001
 From: Stefan Hertenberger <erde74@gmail.com>
 Date: Tue, 3 Nov 2026 22:04:29 +0100
-Subject: [PATCH 3/3] plan9: cgo on amd64 (9front, APE, 9front-gcc)
+Subject: [PATCH 3/4] plan9: cgo on amd64 (9front, APE, 9front-gcc)
 
 - cgo on plan9/amd64 (cmd/dist, internal/platform); it always links
   externally: cmd/link writes an ELF object when it links externally

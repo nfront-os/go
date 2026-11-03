@@ -1,0 +1,75 @@
+From c341536d2376fa433110b154ea3cecd8d5aa79bf Mon Sep 17 00:00:00 2001
+From: Stefan Hertenberger <erde74@gmail.com>
+Date: Tue, 3 Nov 2026 22:33:08 +0100
+Subject: [PATCH 4/4] plan9: cgo on 386 (main for APE's start in
+ rt0_plan9_386.s; the heap segment at 0x70000000: the break and the runtime
+ about 1.7 GB each, a 386 segment has at most 1984 MB)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/cmd/dist/build.go            | 2 +-
+ src/internal/platform/zosarch.go | 2 +-
+ src/runtime/os_plan9_386.go      | 8 +++++---
+ src/runtime/rt0_plan9_386.s      | 7 +++++++
+ 4 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/src/cmd/dist/build.go b/src/cmd/dist/build.go
+index b128ff6c..edd74b9f 100644
+--- a/src/cmd/dist/build.go
++++ b/src/cmd/dist/build.go
+@@ -1824,7 +1824,7 @@ var cgoEnabled = map[string]bool{
+ 	"openbsd/arm64":   true,
+ 	"openbsd/ppc64":   false,
+ 	"openbsd/riscv64": true,
+-	"plan9/386":       false,
++	"plan9/386":       true,
+ 	"plan9/amd64":     true,
+ 	"plan9/arm":       false,
+ 	"plan9/arm64":     false,
+diff --git a/src/internal/platform/zosarch.go b/src/internal/platform/zosarch.go
+index 387ea4d8..ccf18432 100644
+--- a/src/internal/platform/zosarch.go
++++ b/src/internal/platform/zosarch.go
+@@ -102,7 +102,7 @@ var distInfo = map[OSArch]osArchInfo{
+ 	{"openbsd", "arm64"}:   {CgoSupported: true},
+ 	{"openbsd", "ppc64"}:   {},
+ 	{"openbsd", "riscv64"}: {CgoSupported: true},
+-	{"plan9", "386"}:       {},
++	{"plan9", "386"}:       {CgoSupported: true},
+ 	{"plan9", "amd64"}:     {CgoSupported: true},
+ 	{"plan9", "arm"}:       {},
+ 	{"plan9", "arm64"}:     {},
+diff --git a/src/runtime/os_plan9_386.go b/src/runtime/os_plan9_386.go
+index de0e62a1..31b959bb 100644
+--- a/src/runtime/os_plan9_386.go
++++ b/src/runtime/os_plan9_386.go
+@@ -4,6 +4,8 @@
+ 
+ package runtime
+ 
+-// The runtime's heap segment in a cgo program (mem_plan9.go): above
+-// what the break (APE's malloc) is likely to reach.
+-const heapSegBase = 0x40000000
++// The runtime's heap segment in a cgo program (mem_plan9.go). The 386
++// kernel's user space ends below 0xe0000000 (the stack's 16 MB), a
++// segment has at most 1984 MB (SEGMAPSIZE): from 0x70000000 the break
++// (APE's malloc) and the runtime each get about 1.7 GB.
++const heapSegBase = 0x70000000
+diff --git a/src/runtime/rt0_plan9_386.s b/src/runtime/rt0_plan9_386.s
+index 65f34ca3..1b6ac1f9 100644
+--- a/src/runtime/rt0_plan9_386.s
++++ b/src/runtime/rt0_plan9_386.s
+@@ -16,6 +16,13 @@ TEXT _rt0_386_plan9(SB),NOSPLIT,$12
+ 	MOVL	AX, 4(SP)
+ 	JMP	runtime·rt0_go(SB)
+ 
++// main is the start of a cgo program (externally linked: APE's _main calls
++// it, as libc calls main on Linux; rt0_linux_386.s): argc and argv on the
++// stack after the return address.
++TEXT main(SB),NOSPLIT,$0
++	ADDL	$4, SP
++	JMP	runtime·rt0_go(SB)
++
+ GLOBL _tos(SB), NOPTR, $4
+ GLOBL _goprivates(SB), NOPTR, $4
+ GLOBL _nprivates(SB), NOPTR, $4

@@ -117,3 +117,16 @@ Nutzerwunsch: cgo mit einplanen; amd64 zuerst. Go hatte auf Plan 9 nie cgo.
   heutigen APE kollidieren (lldiv_t doppelt).
 - **Ergebnis amd64**: `tests/cgo/run.sh` 5/5 (Cross), `tests/cgo/native.sh` 5/5 (go und gcc im
   Gast); ohne cgo weiter run.sh 10/10 auf amd64 und 386.
+
+## Teil 4 (2026-11-03): cgo auf 386
+
+- Wie amd64, dazu nur: `main` für APEs Start in `rt0_plan9_386.s` (wie `rt0_linux_386.s`:
+  Rücksprungadresse weg, `rt0_go`); g bei `-4(_goprivates)`, also auch mit `&_privates[2]` in
+  Slot 1.
+- **Speicheraufteilung** (Hinweis eines Nebenagenten: das Heap-Segment bei 1 GB ließ C nur ~1 GB):
+  Nutzeradressraum bis knapp 0xe0000000 (16 MB Stack darunter), ein Segment höchstens 1984 MB
+  (SEGMAPSIZE). `heapSegBase` jetzt 0x70000000: brk (APEs malloc) und Go je ~1,7 GB.
+  `tests/cgo/cgomem.go`: C 1,5 GB per malloc, danach Go 1 GB — besteht (mit 1 GB als Grenze
+  hätte C bei ~1 GB aufgehört).
+- **Ergebnis**: `tests/cgo/run.sh` 6/6 auf 386 und amd64, `native.sh` 6/6 auf 386 (go und gcc im
+  Gast, 9front-gccs out-gcc/386); ohne cgo run.sh 386 10/10.
