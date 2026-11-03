@@ -1,0 +1,4 @@
+# the sources are a repository of their own (branch plan9)
+/go/
+/build/
+/out/
