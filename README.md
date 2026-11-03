@@ -40,7 +40,7 @@ On 9front (`cd /; tar xzf go-plan9-amd64.tgz`, or the install CD with `GO_OUT`):
     go run hello.go
 
 `go` finds its tree as `/$objtype/go` (linked with `runtime.defaultGOROOT`); no `$GOROOT`
-needed. The first build compiles std in the guest (about two minutes on amd64 under KVM).
+needed. On the live CD `$home` is read-only: `GOCACHE=/tmp/go-build` for the build cache. The first build compiles std in the guest (about two minutes on amd64 under KVM).
 
 ## Tests
 
@@ -48,4 +48,4 @@ needed. The first build compiles std in the guest (about two minutes on amd64 un
     objtype=arm64 tests/toolchain.sh    # the toolchain in the guest
 
 To put the tree on the install CD: `GO_OUT=../9front-go/out/amd64` for
-`../9front-gccwt`'s `scripts/guest/mkiso.sh`.
+`../9front-gccwt`'s `scripts/guest/mkiso.sh`; its `tests/run.sh go` checks Go on that CD.
