@@ -22,7 +22,7 @@ func core() string {
 }
 
 func main() {
-	runtime.LockOSThread()	// main stays on the first proc
+	runtime.LockOSThread() // main stays on the first proc
 	fmt.Println("core main", core())
 	// procs of their own: each goroutine locked to a new M while the others wait
 	var wg sync.WaitGroup

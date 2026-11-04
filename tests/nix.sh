@@ -3,7 +3,8 @@
 # with *nixac=$NAC of $NCPU processors (default 1 of 4) and runs the programs of tests/prog
 # twice, on the time-sharing cores as usual and through execac(1) on the last
 # application core; tests/nix/core.go shows where the procs run (main on the AC, the
-# procs Go makes on the TCs, as NIX starts a child of an AC process).
+# procs Go makes on the TCs, as NIX starts a child of an AC process); tests/nix/acgo.go
+# (on a TC only) moves one goroutine's proc to the AC itself with rfork(RFCORE).
 # usage: [objtype=amd64|arm64] [PLAN9=../9front-nix] tests/nix.sh
 set -e
 TOP=$(cd "$(dirname "$0")/.." && pwd)
@@ -16,7 +17,7 @@ B=$TOP/build/nix-$A
 export GOCACHE=$TOP/build/gocache	# scripts/build.sh's
 rm -rf "$B"; mkdir -p "$B"
 progs=()
-for f in "$TOP"/tests/prog/*.go "$TOP"/tests/nix/core.go; do
+for f in "$TOP"/tests/prog/*.go "$TOP"/tests/nix/core.go "$TOP"/tests/nix/acgo.go; do
 	n=$(basename "$f" .go)
 	GOOS=plan9 GOARCH=$A CGO_ENABLED=0 "$TOP/go/bin/go" build -o "$B/$n" "$f"
 	progs+=("$B/$n")
@@ -31,6 +32,7 @@ for p in "${progs[@]}"; do
 	*)	run="/tests/$n" ;;
 	esac
 	[ $n = core ] || cmds+=("$run; echo $n status \$status")
+	[ $n = acgo ] && continue	# takes the AC itself
 	cmds+=("execac -c $ac /bin/rc -c '$run' | sed 's/^/ac: /'; echo ac $n status \$status")
 done
 mkdir -p "$TOP/build/empty"
@@ -45,6 +47,7 @@ for p in "${progs[@]}"; do
 	n=$(basename "$p")
 	for where in tc ac; do
 		[ $where = tc ] && [ $n = core ] && continue
+		[ $where = ac ] && [ $n = acgo ] && continue
 		if [ $where = ac ]; then l=$(sed -n 's/^ac: //p' <<<"$log"); else l=$(grep -v '^ac: ' <<<"$log"); fi
 		ok=0
 		case $n in
