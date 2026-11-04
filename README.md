@@ -64,6 +64,7 @@ APE's `_privates[1]`. 386 cross: `i686-pc-plan9-gcc`, `GOARCH=386`; arm64: `aarc
     objtype=arm64 tests/toolchain.sh    # the toolchain in the guest
     tests/cgo/run.sh                    # cgo, cross-built: C calls Go, C threads in Go, notes, errno
     tests/cgo/native.sh                 # the same, built by go and gcc in the guest
+    tests/nix.sh                        # ../9front-nix (application cores): tests/prog on a TC and through execac on the AC
 
 To put the tree on the install CD: `GO_OUT=../9front-go/out/amd64` for
 `../9front-gccwt`'s `scripts/guest/mkiso.sh`; its `tests/run.sh go` checks Go on that CD.
