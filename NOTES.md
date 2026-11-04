@@ -157,5 +157,5 @@ Nutzerwunsch: cgo mit einplanen; amd64 zuerst. Go hatte auf Plan 9 nie cgo.
 - **Ergebnis**: tests/cgo/run.sh 8/8 auf amd64, 386 und arm64 (arm64 dreimal hintereinander); native.sh 7/7 auf arm64 (go und gcc im Gast, 9front-gccs out-gcc/arm64).
 
 ## 2026-11-04: 9front-gccs out neu, CD mit cgo
-- 9front-gccs `out/{amd64,386,arm64}` neu gebaut (gegen den gcc-Branch von heute); native.sh nimmt jetzt `out` statt `out-gcc`: 386 und arm64 je 7/7.
+- 9front-gccs `out/{amd64,386,arm64}` neu gebaut (gegen den gcc-Branch von heute); native.sh nimmt jetzt `out` statt `out-gcc`: amd64, 386 und arm64 je 7/7. Die alten compat-Header (`$target/include`, `libapecompat.a`, Reste von Installationen vor dem 22.10.) aus `out/{amd64,386}` entfernt.
 - Install-CD amd64 mit diesem Go und gcc: tests/go im gcc-Branch 7/7, darin cgo mit dem gcc der CD. Dafür in APE behoben (gcc-Branch, Patch 0022): lib9ps „file not found“ war kein ENOENT; gcc in `/tmp` (ramfs) brach beim Suchen der Header ab.
