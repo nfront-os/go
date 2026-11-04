@@ -1,6 +1,6 @@
 #!/bin/bash
 # cgo on 9front itself: the installed Go (scripts/install.sh, out/$objtype) and 9front-gcc's
-# native gcc (GCC_OUT, ../9front-gcc/out-gcc/$objtype: /$objtype/gnu) in the guest build
+# native gcc (GCC_OUT, ../9front-gcc/out/$objtype: /$objtype/gnu) in the guest build
 # and run the programs of tests/cgo with go build (CGO_ENABLED=1). The guest's root has no
 # headers and archives: the tree's (PLAN9, ../9front-gccwt) go along on the ext4 disk.
 # usage: [objtype=386|arm64] tests/cgo/native.sh
@@ -8,7 +8,7 @@ set -e
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
 A=${objtype:-amd64}
 P=$(cd "${PLAN9:-$TOP/../9front-gccwt}" && pwd)
-G=${GCC_OUT:-$TOP/../9front-gcc/out-gcc/$A}/$A/gnu
+G=${GCC_OUT:-$TOP/../9front-gcc/out/$A}/$A/gnu
 D=$TOP/out/$A/$A/go
 [ -x "$D/bin/go" ] || { echo "cgo/native.sh: no $D: objtype=$A scripts/install.sh" >&2; exit 1; }
 [ -x "$G/bin/gcc" ] || { echo "cgo/native.sh: no $G/bin/gcc (../9front-gcc: build.sh native)" >&2; exit 1; }
