@@ -60,7 +60,7 @@ APE's `_privates[1]`. 386 cross: `i686-pc-plan9-gcc`, `GOARCH=386`; arm64: `aarc
 
 ## Tests
 
-    objtype=amd64 tests/run.sh          # 7 programs: goroutines, timers, files/exec, TCP, notes, panic
+    objtype=amd64 tests/run.sh          # 11 programs: goroutines, timers, files/exec, TCP, notes, panic, rc environment and exit status
     objtype=arm64 tests/toolchain.sh    # the toolchain in the guest
     tests/cgo/run.sh                    # cgo, cross-built: C calls Go, C threads in Go, notes, errno
     tests/cgo/native.sh                 # the same, built by go and gcc in the guest

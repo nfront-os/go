@@ -1,0 +1,141 @@
+From 76c65f277f7d74e54666f4ffaf1244f93e25693e Mon Sep 17 00:00:00 2001
+From: Stefan Hertenberger <erde74@gmail.com>
+Date: Thu, 5 Nov 2026 15:19:32 +0100
+Subject: [PATCH 6/6] syscall: plan9: rc's functions and the wait message as
+ Plan 9 has them
+
+A child's /env got every value with a NUL after it: right for a variable (a
+list, each word ended by a NUL), but a function (fn#name) is rc source that
+rc reads back with ". -bq", and the NUL made it a syntax error in every rc
+started from Go ("/env/fn#sigexit:1: syntax error"). envValue writes both as
+rc does, for fork/exec and for Exec alike (Exec wrote no NUL at all); an
+empty function (rc leaves /env/fn#x empty after fn x) is written as 0 bytes
+from a valid address, as the kernel refuses nil even then.
+
+Waitmsg.Msg kept the kernel's %q quoting ('rc 123: it''s'; only '' was
+taken out): it is now the message itself, as libc's wait gives it, and
+ExitError.Error() says "exit status: rc 123: it's". TestExitStatus expected
+the quotes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/os/exec/exec_test.go     |  2 +-
+ src/syscall/exec_plan9.go    | 24 ++++++++++++++++++----
+ src/syscall/syscall_plan9.go | 39 +++++++++++++++++++++++++++++++-----
+ 3 files changed, 55 insertions(+), 10 deletions(-)
+
+diff --git a/src/os/exec/exec_test.go b/src/os/exec/exec_test.go
+index 4f39d9bb..d7da263b 100644
+--- a/src/os/exec/exec_test.go
++++ b/src/os/exec/exec_test.go
+@@ -402,7 +402,7 @@ func TestExitStatus(t *testing.T) {
+ 	want := "exit status 42"
+ 	switch runtime.GOOS {
+ 	case "plan9":
+-		want = fmt.Sprintf("exit status: '%s %d: 42'", filepath.Base(cmd.Path), cmd.ProcessState.Pid())
++		want = fmt.Sprintf("exit status: %s %d: 42", filepath.Base(cmd.Path), cmd.ProcessState.Pid())
+ 	}
+ 	if werr, ok := err.(*exec.ExitError); ok {
+ 		if s := werr.Error(); s != want {
+diff --git a/src/syscall/exec_plan9.go b/src/syscall/exec_plan9.go
+index f0481e8b..1da00739 100644
+--- a/src/syscall/exec_plan9.go
++++ b/src/syscall/exec_plan9.go
+@@ -345,6 +345,20 @@ type envItem struct {
+ 	nvalue int
+ }
+ 
++// envValue is what the file /env/name holds for name=value, as rc writes
++// it: a variable is a list, each word ended by a NUL (the runtime drops
++// the last NUL when it reads one, goenvs), but a function, fn#name, is rc
++// source that rc reads back with ". -bq": a NUL after it is a syntax error.
++// Its capacity is at least 1.
++func envValue(name, value string) []byte {
++	b := make([]byte, len(value), len(value)+1)
++	copy(b, value)
++	if len(name) < 3 || name[:3] != "fn#" {
++		b = append(b, 0)
++	}
++	return b
++}
++
+ type ProcAttr struct {
+ 	Dir   string    // Current working directory.
+ 	Env   []string  // Environment.
+@@ -414,9 +428,11 @@ func forkExec(argv0 string, argv []string, attr *ProcAttr) (pid int, err error)
+ 			if err != nil {
+ 				return 0, err
+ 			}
+-			envvalue := make([]byte, len(v)-i)
+-			copy(envvalue, v[i+1:])
+-			envvParsed = append(envvParsed, envItem{envname, &envvalue[0], len(v) - i})
++			envvalue := envValue(v[:i], v[min(i+1, len(v)):])
++			// an empty function (rc leaves /env/fn#x empty after fn x)
++			// is written as 0 bytes, but from a valid address: the
++			// kernel refuses nil even then
++			envvParsed = append(envvParsed, envItem{envname, &envvalue[:1][0], len(envvalue)})
+ 		}
+ 	}
+ 
+@@ -553,7 +569,7 @@ func Exec(argv0 string, argv []string, envv []string) (err error) {
+ 				return e
+ 			}
+ 
+-			_, e = Write(fd, []byte(v[i+1:]))
++			_, e = Write(fd, envValue(v[:i], v[min(i+1, len(v)):]))
+ 			if e != nil {
+ 				Close(fd)
+ 				return e
+diff --git a/src/syscall/syscall_plan9.go b/src/syscall/syscall_plan9.go
+index 2a6229b2..b9aa6102 100644
+--- a/src/syscall/syscall_plan9.go
++++ b/src/syscall/syscall_plan9.go
+@@ -321,14 +321,43 @@ func Await(w *Waitmsg) (err error) {
+ 	w.Time[0] = uint32(atoi(f[1]))
+ 	w.Time[1] = uint32(atoi(f[2]))
+ 	w.Time[2] = uint32(atoi(f[3]))
+-	w.Msg = cstring(f[4])
+-	if w.Msg == "''" {
+-		// await() returns '' for no error
+-		w.Msg = ""
+-	}
++	// the kernel quotes the message (%q: 'rc 123: x' for rc 123: x, ''
++	// for no error); Msg is the message itself, as libc's wait gives it
++	w.Msg = unquoteWaitMsg(cstring(f[4]))
+ 	return
+ }
+ 
++// unquoteWaitMsg undoes the kernel's %q quoting of a wait message, as
++// tokenize(2) does: quotes are dropped, a doubled quote inside them is one.
++func unquoteWaitMsg(s string) string {
++	q := false
++	for i := 0; i < len(s); i++ {
++		if s[i] == '\'' {
++			q = true
++			break
++		}
++	}
++	if !q {
++		return s
++	}
++	b := make([]byte, 0, len(s))
++	in := false
++	for i := 0; i < len(s); i++ {
++		c := s[i]
++		if c != '\'' {
++			b = append(b, c)
++			continue
++		}
++		if in && i+1 < len(s) && s[i+1] == '\'' {
++			b = append(b, '\'')
++			i++
++			continue
++		}
++		in = !in
++	}
++	return string(b)
++}
++
+ func Unmount(name, old string) (err error) {
+ 	if fixwd(name, old) {
+ 		defer runtime.UnlockOSThread()

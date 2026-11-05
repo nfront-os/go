@@ -1,7 +1,7 @@
 From e8bd42b02a8d90b11e7fe5e8a0806cb375d6b741 Mon Sep 17 00:00:00 2001
 From: Stefan Hertenberger <erde74@gmail.com>
 Date: Tue, 3 Nov 2026 19:02:46 +0100
-Subject: [PATCH 2/5] os, net tests on 9front: TestOpenError takes 9front's
+Subject: [PATCH 2/6] os, net tests on 9front: TestOpenError takes 9front's
  form of errors (the kernel puts the name after the error: "file does not
  exist: '/x'"); TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion skipped on
  plan9 (WriteMsgUDP not supported; it ran only with ::1 configured)

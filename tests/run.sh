@@ -24,6 +24,8 @@ for p in "${progs[@]}"; do
 	case $n in
 	panic)	cmds+=("/tests/panic >[2=1]; echo panic status \$status") ;;
 	parallel)	cmds+=("WANTCPU=$smp /tests/parallel") ;;
+	# a function, a list, and a function deleted (an empty /env/fn#rcenvgone)
+	rcenv)	cmds+=("fn rcenvfn {echo fn ok}; rcenvlist=(a b c); fn rcenvgone {x}; fn rcenvgone; /tests/rcenv") ;;
 	*)	cmds+=("/tests/$n") ;;
 	esac
 done

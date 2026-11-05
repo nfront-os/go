@@ -1,7 +1,7 @@
 From 46bd22fddb040fc4c695d13ae371555c81430344 Mon Sep 17 00:00:00 2001
 From: Stefan Hertenberger <erde74@gmail.com>
 Date: Tue, 3 Nov 2026 15:55:34 +0100
-Subject: [PATCH 1/5] plan9/arm64: a port for 9front's arm64 kernel
+Subject: [PATCH 1/6] plan9/arm64: a port for 9front's arm64 kernel
 
 The OS layer only (the arm64 compiler, assembler and linker are there):
 - cmd/dist, internal/platform: plan9/arm64 a port (no cgo).
