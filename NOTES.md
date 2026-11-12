@@ -1,174 +1,174 @@
-# 9front-go: Notizen zum Port
+# 9front-go: Notes on the port
 
-## Teil 1 (2026-11-03): Go 1.27.3 für 9front, amd64/386 gebaut, plan9/arm64 portiert
+## Part 1 (2026-11-03): Go 1.27.3 for 9front, amd64/386 built, plan9/arm64 ported
 
-**Auftrag:** Go als Programmiersprache für alle Arches des gcc-Branchs (386, amd64, arm64);
-eigenes Repo (wie 9front-rust), plan9/arm64 portieren. ELF statt a.out bringt keine
-Geschwindigkeit (gleicher Code, nur anderes Ladeformat); Go-Programme bleiben a.out und
-laufen damit auch auf 9front selbst.
+**Task:** Go as a programming language for all arches of the gcc branch (386, amd64, arm64);
+own repo (like 9front-rust), port plan9/arm64. ELF instead of a.out brings no
+speed (same code, only a different load format); Go programs stay a.out and
+thus also run on 9front itself.
 
-**Aufbau:** `go/` = go1.27.3 (flacher Klon), Branch `plan9`. `scripts/build.sh`: make.bash
-für den Host, dann `GOOS=plan9 GOARCH=$A go install std cmd`. `scripts/install.sh`: Baum
-`/$objtype/go` mit src, lib, misc, api, `pkg/include` (Header des Assemblers: ohne sie
-scheitert jedes `go build` im Gast an textflag.h), Befehle neu gelinkt mit `-trimpath` und
-`-X runtime.defaultGOROOT=/$A/go` (sonst trüge `go` den Host-Pfad als GOROOT; über
-`bind -b /$A/go/bin /bin` findet os.Executable den Baum nicht).
+**Layout:** `go/` = go1.27.3 (flat clone), branch `plan9`. `scripts/build.sh`: make.bash
+for the host, then `GOOS=plan9 GOARCH=$A go install std cmd`. `scripts/install.sh`: tree
+`/$objtype/go` with src, lib, misc, api, `pkg/include` (the assembler's headers: without them
+every `go build` in the guest fails on textflag.h), commands relinked with `-trimpath` and
+`-X runtime.defaultGOROOT=/$A/go` (otherwise `go` would carry the host path as GOROOT; via
+`bind -b /$A/go/bin /bin` os.Executable does not find the tree).
 
-**amd64 (Gos eigener Port) auf dem gcc-Kernel:** läuft ohne Änderung. `tests/run.sh` 7/7.
-`go run` im Gast: ~110 s beim ersten Mal (std übersetzen), danach `go build` 1,5 s.
-Loopback: der Gast richtet nur ether0 ein; die Tests machen `ip/ipconfig loopback
-/dev/null 127.1` wie 9front-rust.
+**amd64 (Go's own port) on the gcc kernel:** runs without changes. `tests/run.sh` 7/7.
+`go run` in the guest: ~110 s the first time (compiling std), afterwards `go build` 1.5 s.
+Loopback: the guest sets up only ether0; the tests run `ip/ipconfig loopback
+/dev/null 127.1` like 9front-rust.
 
-**plan9/arm64 (neu):** nur die OS-Schicht, arm64-Compiler/Assembler/Linker gibt es.
-Vorlage plan9/arm (g auch dort im Register).
-- Kernel-Schnittstelle (9front `sys/src/9/arm64`): Systemaufruf-Nummer in R0, `SVC`; der
-  Kernel liest die Argumente ab `sp+8` in 8-Byte-Fächern (`va_arg` von int liest die unteren
-  4 Byte). Das ist bei einer Go-Funktion ohne Rahmen genau `arg+0(FP)`; nur gepackte
-  int32-Paare (`dupfd(old, new int32)`) und seek (Zeiger auf das Ergebnis zuerst) brauchen
-  einen eigenen Rahmen. Ergebnis in R0.
-- Start: R0 = Tos, argc bei 0(RSP), argv danach; rt0 richtet RSP auf 16 aus.
-- Notes (`trap.c notify`): R0 = Ureg*, Ureg* bei 8(RSP), Notentext bei 16(RSP), LR=0;
-  zurück nur über noted. sigtramp wechselt auf den gsignal-Stack, ruft sighandler, dann
-  noted. sigpanictramp legt das LR der fehlerhaften Funktion (sighandler hat es in r0
-  gelegt) auf den Stack, wie preparePanic in signal_arm64.go, und springt in
-  `sigpanic<ABIInternal>`. FP-Register überstehen Notes (`fpunotify`).
-- Tos.pid bei Offset 64 (wie amd64). g nur in R28, kein TLS (`tls_arm64.h`: plan9 ohne
-  cgo, load_g/save_g kehren vorher zurück).
-- Linker: R_MAGIC (`4*28*28+7` | HDR_MAGIC = 0x8c47), Kopf 40 Byte, Text ab 0x10028, Daten
-  auf der nächsten 64K-Grenze (der Kernel richtet R_MAGIC-Daten auf 64K aus,
-  `sysproc.c`). Der alte Hplan9-Zweig in `cmd/link/internal/arm64/obj.go` (32-Byte-Kopf,
-  4K) passte zu keinem Kernel.
-- `internal/cpu`: nichts zu tun, `cpu_arm64_other.go` liest keine Systemregister (die
-  9front aus EL0 nicht emuliert).
-- `syscall` und das vendorte `golang.org/x/sys/plan9` (cmd): asm + zsyscall für arm64.
-  Hinweis: `go mod vendor` in cmd würde die x/sys-Dateien entfernen; upstream bräuchte x/sys
-  dieselben zwei Dateien.
-- Ergebnis im arm64-Gast (ein Prozessor, `arm64/9qemu.u` vom 31.10.): `tests/run.sh` 7/7 beim
-  ersten Lauf (auch nil-Zugriff → panic → recover, Notes über os/signal, TCP, exec).
+**plan9/arm64 (new):** only the OS layer, the arm64 compiler/assembler/linker exist.
+Template plan9/arm (g is in a register there too).
+- Kernel interface (9front `sys/src/9/arm64`): system call number in R0, `SVC`; the
+  kernel reads the arguments from `sp+8` in 8-byte slots (`va_arg` of int reads the lower
+  4 bytes). For a Go function without a frame that is exactly `arg+0(FP)`; only packed
+  int32 pairs (`dupfd(old, new int32)`) and seek (pointer to the result first) need
+  a frame of their own. Result in R0.
+- Start: R0 = Tos, argc at 0(RSP), argv after it; rt0 aligns RSP to 16.
+- Notes (`trap.c notify`): R0 = Ureg*, Ureg* at 8(RSP), note text at 16(RSP), LR=0;
+  return only via noted. sigtramp switches to the gsignal stack, calls sighandler, then
+  noted. sigpanictramp puts the LR of the faulting function (sighandler put it in r0)
+  on the stack, like preparePanic in signal_arm64.go, and jumps to
+  `sigpanic<ABIInternal>`. FP registers survive notes (`fpunotify`).
+- Tos.pid at offset 64 (like amd64). g only in R28, no TLS (`tls_arm64.h`: plan9 without
+  cgo, load_g/save_g return early).
+- Linker: R_MAGIC (`4*28*28+7` | HDR_MAGIC = 0x8c47), header 40 bytes, text from 0x10028, data
+  on the next 64K boundary (the kernel aligns R_MAGIC data to 64K,
+  `sysproc.c`). The old Hplan9 branch in `cmd/link/internal/arm64/obj.go` (32-byte header,
+  4K) did not fit any kernel.
+- `internal/cpu`: nothing to do, `cpu_arm64_other.go` reads no system registers (which
+  9front does not emulate from EL0).
+- `syscall` and the vendored `golang.org/x/sys/plan9` (cmd): asm + zsyscall for arm64.
+  Note: `go mod vendor` in cmd would remove the x/sys files; upstream x/sys would need
+  the same two files.
+- Result in the arm64 guest (one processor, `arm64/9qemu.u` of 31.10.): `tests/run.sh` 7/7 on the
+  first run (also nil access → panic → recover, notes via os/signal, TCP, exec).
 
-**cgo:** geplant (Nutzerwunsch), siehe Plan: externes Linken mit 9front-gccs gcc (ELF wie die
-übrigen gcc-Port-Programme), Start über APEs `_main` → Gos `main`, runtime/cgo über
-pthreads von APE.
+**cgo:** planned (user request), see plan: external linking with 9front-gcc's gcc (ELF like the
+other gcc-port programs), start via APE's `_main` → Go's `main`, runtime/cgo via
+pthreads from APE.
 
-## Teil 2 (2026-11-03): Mehrkern, Gos std-Tests im Gast, drei Fehler in 9front
+## Part 2 (2026-11-03): Multicore, Go's std tests in the guest, three bugs in 9front
 
-- **Mehrkern** (`tests/prog/parallel.go`, `WANTCPU`): GOMAXPROCS = Prozessoren, CPU-Arbeit auf
-  allen, Atomics, umkämpfter Mutex, Kanal-Pingpong, GC nebenher. 4 Prozessoren: amd64, 386,
-  arm64 bestanden, Speedup 2,5–2,7. arm64 startete bis dahin nur einen Prozessor: der Gast
-  bootete einen alten `9qemu.u` ohne den SMP-Fix des Baums (585787b25); nach `ARCH=arm64` und
-  `scripts/guest/build-boot.sh` dort alle vier. `tests/guest.sh` nimmt jetzt auch auf arm64 4.
-- **install.sh**: auch die von cmd/dist erzeugten, in Git ignorierten Dateien (`zzipdata.go`
-  der tzdata, `zversion.go`, `zbootstrap.go`, `zdefaultcc.go`); ohne zzipdata baute `time`s
-  Test nicht („undefined: zipdata“).
-- **toolchain.sh**: `::1` als Loopback (`ip/ipconfig loopback /dev/null ::1 /128`, ipconfig(8)),
-  Prüfmuster mit Tab nach „ok“.
-- **Fehler in 9front** (im gcc-Branch behoben, Patches 0018–0020 dort):
-  - ext4srv starb bei `go test` (arm64): ein Lesen von 0 Byte ließ den count von Rread
-    uninitialisiert (> msize, lib9p brach ab).
-  - ext4srv: remove und rename ohne Schreibrecht im Elternverzeichnis
+- **Multicore** (`tests/prog/parallel.go`, `WANTCPU`): GOMAXPROCS = processors, CPU work on
+  all, atomics, contended mutex, channel ping-pong, GC alongside. 4 processors: amd64, 386,
+  arm64 passed, speedup 2.5–2.7. Until then arm64 started only one processor: the guest
+  booted an old `9qemu.u` without the tree's SMP fix (585787b25); after `ARCH=arm64` and
+  `scripts/guest/build-boot.sh` all four there. `tests/guest.sh` now also takes 4 on arm64.
+- **install.sh**: also the files generated by cmd/dist and ignored in Git (`zzipdata.go`
+  of tzdata, `zversion.go`, `zbootstrap.go`, `zdefaultcc.go`); without zzipdata `time`'s
+  test did not build („undefined: zipdata“).
+- **toolchain.sh**: `::1` as loopback (`ip/ipconfig loopback /dev/null ::1 /128`, ipconfig(8)),
+  check pattern with tab after „ok“.
+- **Bugs in 9front** (fixed in the gcc branch, patches 0018–0020 there):
+  - ext4srv died on `go test` (arm64): a read of 0 bytes left the count of Rread
+    uninitialized (> msize, lib9p aborted).
+  - ext4srv: remove and rename without write permission in the parent directory
     (`TestRemoveAllButReadOnlyAndPathError`).
-  - TCP-Loopback: Schreiben an eine geschlossene Gegenseite verschwand still
-    (`TestWritevError`); jetzt „i/o on hungup channel“, `tests/prog/tcpclosed.go`.
-- **Go-Tests angepasst** (go/, Branch plan9): `TestOpenError` nimmt 9fronts Form der Fehler
-  (Kernel `namec`: Name hinter dem Fehler); `TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion`
-  auf plan9 übersprungen (WriteMsgUDP gibt es nicht).
-- **Ergebnis** (`go test -short` errors strings strconv sort fmt os time sync net, toolchain.sh): amd64, 386 und arm64 je 14/14, run.sh je 10/10 mit 4 Prozessoren.
-  arm64 vor den Fixes: dieselben Fehler wie amd64, also kein Fehler des arm64-Ports.
-- **Vierter Fehler in 9front** (gcc-Branch, Patch 0021): ext4srv starb, wenn ein offenes
-  Verzeichnis nach dem Leeren/Löschen weitergelesen wurde (Gos os-Tests auf arm64:
-  `fault read addr=0x6`). `tests/prog/dirremove.go` zeigt es auch auf amd64 (stürzte sofort
-  ab, jetzt Ende des Verzeichnisses; die Einträge danach kommen aus Gos 64-KB-Puffer, keiner
-  existiert noch). `tests/run.sh` legt /tmp dafür auf eine ext4-Platte.
-- **Falle arm64**: nach jedem Build mit `ARCH=arm64` ist `9qemu` neuer als `9qemu.u`, und
-  `boot-cli.sh` bootet absichtlich nicht (alter Kernel). Erst `scripts/guest/build-boot.sh`.
-  run.sh und toolchain.sh sagen jetzt, wenn der Gast nicht hochkam (vorher nur „0/14“).
+  - TCP loopback: writing to a closed peer vanished silently
+    (`TestWritevError`); now „i/o on hungup channel“, `tests/prog/tcpclosed.go`.
+- **Go tests adapted** (go/, branch plan9): `TestOpenError` takes 9front's form of the errors
+  (kernel `namec`: name after the error); `TestIPv6WriteMsgUDPAddrPortTargetAddrIPVersion`
+  skipped on plan9 (there is no WriteMsgUDP).
+- **Result** (`go test -short` errors strings strconv sort fmt os time sync net, toolchain.sh): amd64, 386 and arm64 14/14 each, run.sh 10/10 each with 4 processors.
+  arm64 before the fixes: the same failures as amd64, so not a bug of the arm64 port.
+- **Fourth bug in 9front** (gcc branch, patch 0021): ext4srv died when an open
+  directory was read further after being emptied/deleted (Go's os tests on arm64:
+  `fault read addr=0x6`). `tests/prog/dirremove.go` shows it on amd64 too (crashed immediately,
+  now end of directory; the entries after that come from Go's 64 KB buffer, none of them
+  exists any more). `tests/run.sh` puts /tmp on an ext4 disk for it.
+- **arm64 pitfall**: after every build with `ARCH=arm64`, `9qemu` is newer than `9qemu.u`, and
+  `boot-cli.sh` deliberately does not boot (old kernel). First `scripts/guest/build-boot.sh`.
+  run.sh and toolchain.sh now say when the guest did not come up (before, only „0/14“).
 
-## Teil 3 (2026-11-03): cgo auf amd64
+## Part 3 (2026-11-03): cgo on amd64
 
-Nutzerwunsch: cgo mit einplanen; amd64 zuerst. Go hatte auf Plan 9 nie cgo.
-- **Linken**: cgo verlangt auf plan9 externes Linken (`internal/platform.MustLinkExternal`);
-  `cmd/link` schreibt dann ein ELF-Objekt (Elfinit nach `determineLinkMode`, asmbElf statt
-  asmbPlan9), 9front-gccs gcc linkt mit `plan9.ld` und APE ein ELF. Start: APEs `_main` →
-  `_callmain` → libgccs `__wrap_main` → `__plan9_mainstack` (main auf 16 MB Heap-Stack) →
-  Gos `main` (asm_amd64.s) → `rt0_go`.
-- **TLS**: Gos TLS-Zeiger hieß `_privates`; das ist in einem cgo-Programm APEs Feld und Slot 0
-  gehört dem pthread. Jetzt `_goprivates` (asm6, rt0_plan9_*.s); `gcc_plan9.c` setzt ihn in
-  x_cgo_inittls auf `&_privates[2]` — g liegt bei `-8(_goprivates)` (Tlsoffset), also in Slot 1.
-  Erster Versuch `&_privates[1]` traf Slot 0 (das struct __pthread als g: Absturz in sigtramp).
-  `_goprivates` und `_tos` sind für die C-Seite exportiert (`cgo_export_static`), sonst lokal
-  im go.o (APEs `_tos` wäre ein anderes gewesen).
-- **Heap**: Go und APEs malloc nahmen beide brk ab `end`. In einem cgo-Programm ist Gos Heap ein
-  eigenes Segment (`segattach "memory"` bei `heapSegBase`, 16 TB auf amd64/arm64, 1 GB auf 386;
-  Wachstum mit segbrk), angelegt in osinit, bevor es andere Procs gibt (ein RFMEM-Kind teilt nur
-  die Segmente, die beim fork da waren, aber deren Wachstum).
-- **Fehler im Baum** (gcc-Branch): `plan9.ld` setzte `end` vor Gos `.noptrbss` (verwaiste
-  Sektion) — malloc überschrieb Gos Variablen; APEs pthreads erbten die `_privates` des
-  Erzeugers — ein C-Thread hielt das g seines Erzeugers für seins. Beides behoben.
-- **Runtime**: runtime/cgos POSIX-Teil (pthreads) baut für plan9; `cgoBindM` erlaubt (pthread-
-  Schlüssel mit Destruktor gibt es in APE); `minit` setzt procid für Threads von runtime/cgo.
-- **errno**: cgo liefert `syscall.Errno` (auf plan9 nur ein Platzhalter, „errno N“) mit APEs
-  Zahlen (ENOENT 20).
-- **Build-Cache**: mit einer Release-VERSION (go1.27.3) erkennt cmd/go den Compiler nur an der
-  Version; nach der Umbenennung kamen Objekte des alten Assemblers aus dem Cache („relocation
-  target _privates not defined“). build.sh/install.sh/Tests haben jetzt `build/gocache`, den
-  `HOST=1` leert.
-- **Nativ**: braucht 9front-gccs nativen gcc ohne die alten compat-Header: `out-gcc/$objtype`
-  (30.10.); `out/amd64` (22.10.) hat noch `x86_64-pc-plan9/include/stdlib.h` & co., die mit dem
-  heutigen APE kollidieren (lldiv_t doppelt).
-- **Ergebnis amd64**: `tests/cgo/run.sh` 5/5 (Cross), `tests/cgo/native.sh` 5/5 (go und gcc im
-  Gast); ohne cgo weiter run.sh 10/10 auf amd64 und 386.
+User request: plan cgo in; amd64 first. Go never had cgo on Plan 9.
+- **Linking**: on plan9 cgo requires external linking (`internal/platform.MustLinkExternal`);
+  `cmd/link` then writes an ELF object (Elfinit after `determineLinkMode`, asmbElf instead of
+  asmbPlan9), 9front-gcc's gcc links an ELF with `plan9.ld` and APE. Start: APE's `_main` →
+  `_callmain` → libgcc's `__wrap_main` → `__plan9_mainstack` (main on a 16 MB heap stack) →
+  Go's `main` (asm_amd64.s) → `rt0_go`.
+- **TLS**: Go's TLS pointer was called `_privates`; in a cgo program that is APE's field and slot 0
+  belongs to the pthread. Now `_goprivates` (asm6, rt0_plan9_*.s); `gcc_plan9.c` sets it
+  in x_cgo_inittls to `&_privates[2]` — g is at `-8(_goprivates)` (Tlsoffset), so in slot 1.
+  First attempt `&_privates[1]` hit slot 0 (the struct __pthread as g: crash in sigtramp).
+  `_goprivates` and `_tos` are exported for the C side (`cgo_export_static`), otherwise local
+  in go.o (APE's `_tos` would have been a different one).
+- **Heap**: Go and APE's malloc both took brk from `end`. In a cgo program Go's heap is a
+  segment of its own (`segattach "memory"` at `heapSegBase`, 16 TB on amd64/arm64, 1 GB on 386;
+  growth with segbrk), created in osinit before there are other procs (an RFMEM child shares only
+  the segments that existed at fork, but their growth).
+- **Bugs in the tree** (gcc branch): `plan9.ld` put `end` before Go's `.noptrbss` (orphan
+  section) — malloc overwrote Go's variables; APE's pthreads inherited the creator's
+  `_privates` — a C thread took its creator's g for its own. Both fixed.
+- **Runtime**: runtime/cgo's POSIX part (pthreads) builds for plan9; `cgoBindM` allowed (pthread
+  keys with destructors exist in APE); `minit` sets procid for threads from runtime/cgo.
+- **errno**: cgo delivers `syscall.Errno` (on plan9 only a placeholder, „errno N“) with APE's
+  numbers (ENOENT 20).
+- **Build cache**: with a release VERSION (go1.27.3) cmd/go recognizes the compiler only by the
+  version; after the renaming, objects of the old assembler came from the cache („relocation
+  target _privates not defined“). build.sh/install.sh/tests now have `build/gocache`, which
+  `HOST=1` empties.
+- **Native**: needs 9front-gcc's native gcc without the old compat headers: `out-gcc/$objtype`
+  (30.10.); `out/amd64` (22.10.) still has `x86_64-pc-plan9/include/stdlib.h` & co., which collide with
+  today's APE (lldiv_t twice).
+- **Result amd64**: `tests/cgo/run.sh` 5/5 (cross), `tests/cgo/native.sh` 5/5 (go and gcc in the
+  guest); without cgo run.sh still 10/10 on amd64 and 386.
 
-## Teil 4 (2026-11-03): cgo auf 386
+## Part 4 (2026-11-03): cgo on 386
 
-- Wie amd64, dazu nur: `main` für APEs Start in `rt0_plan9_386.s` (wie `rt0_linux_386.s`:
-  Rücksprungadresse weg, `rt0_go`); g bei `-4(_goprivates)`, also auch mit `&_privates[2]` in
-  Slot 1.
-- **Speicheraufteilung** (Hinweis eines Nebenagenten: das Heap-Segment bei 1 GB ließ C nur ~1 GB):
-  Nutzeradressraum bis knapp 0xe0000000 (16 MB Stack darunter), ein Segment höchstens 1984 MB
-  (SEGMAPSIZE). `heapSegBase` jetzt 0x70000000: brk (APEs malloc) und Go je ~1,7 GB.
-  `tests/cgo/cgomem.go`: C 1,5 GB per malloc, danach Go 1 GB — besteht (mit 1 GB als Grenze
-  hätte C bei ~1 GB aufgehört).
-- **Ergebnis**: `tests/cgo/run.sh` 6/6 auf 386 und amd64, `native.sh` 6/6 auf 386 (go und gcc im
-  Gast, 9front-gccs out-gcc/386); ohne cgo run.sh 386 10/10.
+- Like amd64, plus only: `main` for APE's start in `rt0_plan9_386.s` (like `rt0_linux_386.s`:
+  return address dropped, `rt0_go`); g at `-4(_goprivates)`, so also with `&_privates[2]` in
+  slot 1.
+- **Memory layout** (hint from a side agent: the heap segment at 1 GB left C only ~1 GB):
+  user address space up to just under 0xe0000000 (16 MB stack below), a segment at most 1984 MB
+  (SEGMAPSIZE). `heapSegBase` is now 0x70000000: brk (APE's malloc) and Go ~1.7 GB each.
+  `tests/cgo/cgomem.go`: C 1.5 GB via malloc, then Go 1 GB — passes (with 1 GB as the limit
+  C would have stopped at ~1 GB).
+- **Result**: `tests/cgo/run.sh` 6/6 on 386 and amd64, `native.sh` 6/6 on 386 (go and gcc in the
+  guest, 9front-gcc's out-gcc/386); without cgo run.sh 386 10/10.
 
-## Teil 5 (2026-11-03): cgo auf arm64; Notes und Ende mit Threads von C
+## Part 5 (2026-11-03): cgo on arm64; notes and exit with threads from C
 
-- **arm64**: g liegt in R28; C sichert R28 (callee-saved), darf es aber zwischendurch benutzen.
-  `load_g`/`save_g` für plan9 (tls_arm64.s) halten g in einem cgo-Programm zusätzlich in APEs
-  `_privates[1]` (`-8(_goprivates)`, wie amd64); `sigtramp` lädt es dort (eine Note mitten in C).
-  `_goprivates` jetzt auch in rt0_plan9_arm64.s. `main` gibt es in asm_arm64.s schon.
-- **Adressraum arm64**: 9fronts Nutzerraum ist nur 32 GB (EVASHIFT 36), ein Segment höchstens 8 GB
-  (SEGMAPSIZE 8192): `heapSegBase` 8 GB (vorher 16 TB — außerhalb).
-- **cmd/go** überschrieb `bin/plan9_arm64/go` nicht („not an object file“): es kannte die a.out-
-  Magic von arm64 nicht (0x00008c47); ebenso `debug/plan9obj` (unexportiert, keine API-Änderung).
-- **Notes auf Threads von C** (Hinweis eines Nebenagenten): ein reiner C-Thread hat kein g,
-  `sigtramp` rief `badsignal2`, der Thread endete — bei jeder Note an die Note-Gruppe (Entf).
-  Jetzt `badnote`: in einem cgo-Programm eine eigene Falle („sys: …“) mit dem Standard (der Proc
-  stirbt wie in C), jede andere Note NCONT (Gos Threads bekommen Gruppen-Notes selbst).
-- **Ende**: Gos `exit` schickt „go: exit“ nur an seine Ms; C-Threads liefen nach dem Ende von
-  main weiter. Jetzt ruft exit in einem cgo-Programm APEs `__pthread_killothers` (neu, gcc-Branch;
-  proc(3) ctl „kill“ für jeden pthread). Gegenprobe ohne: ein Proc blieb.
-- **Rennen beim Ende** (arm64, cgoparallel: ein Proc in Semacquire blieb): (1) exit tötete erst die
-  pthreads und setzte danach `exiting` — ein M dazwischen parkte; jetzt `goexitsall` zuerst.
-  (2) APE: ein Thread steht mit pid 0 in der Liste, bis er läuft; `killothers` übersprang ihn.
-  Jetzt setzt killothers erst `exiting`, ein neuer Thread speichert erst seine pid und liest dann
-  `exiting` (SEQ_CST): einer sieht den anderen.
-- `tests/cgo/cnote.go` (C-Thread übersteht eine Note, Programm endet), run.sh listet übrige Procs.
-- **Ergebnis**: tests/cgo/run.sh 8/8 auf amd64, 386 und arm64 (arm64 dreimal hintereinander); native.sh 7/7 auf arm64 (go und gcc im Gast, 9front-gccs out-gcc/arm64).
+- **arm64**: g lives in R28; C saves R28 (callee-saved), but may use it in between.
+  `load_g`/`save_g` for plan9 (tls_arm64.s) additionally keep g in a cgo program in APE's
+  `_privates[1]` (`-8(_goprivates)`, like amd64); `sigtramp` loads it from there (a note in the middle of C).
+  `_goprivates` now also in rt0_plan9_arm64.s. `main` already exists in asm_arm64.s.
+- **Address space arm64**: 9front's user space is only 32 GB (EVASHIFT 36), a segment at most 8 GB
+  (SEGMAPSIZE 8192): `heapSegBase` 8 GB (before 16 TB — outside).
+- **cmd/go** did not overwrite `bin/plan9_arm64/go` („not an object file“): it did not know arm64's a.out
+  magic (0x00008c47); likewise `debug/plan9obj` (unexported, no API change).
+- **Notes on threads from C** (hint from a side agent): a pure C thread has no g,
+  `sigtramp` called `badsignal2`, the thread ended — on every note to the note group (Del).
+  Now `badnote`: in a cgo program a trap of its own („sys: …“) with the default (the proc
+  dies as in C), every other note NCONT (Go's threads get group notes themselves).
+- **Exit**: Go's `exit` sends „go: exit“ only to its Ms; C threads kept running after the end of
+  main. Now in a cgo program exit calls APE's `__pthread_killothers` (new, gcc branch;
+  proc(3) ctl „kill“ for each pthread). Control test without it: one proc remained.
+- **Race at exit** (arm64, cgoparallel: one proc in Semacquire remained): (1) exit first killed the
+  pthreads and only then set `exiting` — an M in between parked; now `goexitsall` first.
+  (2) APE: a thread is in the list with pid 0 until it runs; `killothers` skipped it.
+  Now killothers sets `exiting` first, a new thread first stores its pid and then reads
+  `exiting` (SEQ_CST): one sees the other.
+- `tests/cgo/cnote.go` (C thread survives a note, program ends), run.sh lists remaining procs.
+- **Result**: tests/cgo/run.sh 8/8 on amd64, 386 and arm64 (arm64 three times in a row); native.sh 7/7 on arm64 (go and gcc in the guest, 9front-gcc's out-gcc/arm64).
 
-## 2026-11-04: 9front-gccs out neu, CD mit cgo
-- 9front-gccs `out/{amd64,386,arm64}` neu gebaut (gegen den gcc-Branch von heute); native.sh nimmt jetzt `out` statt `out-gcc`: amd64, 386 und arm64 je 7/7. Die alten compat-Header (`$target/include`, `libapecompat.a`, Reste von Installationen vor dem 22.10.) aus `out/{amd64,386}` entfernt.
-- Install-CD amd64 mit diesem Go und gcc: tests/go im gcc-Branch 7/7, darin cgo mit dem gcc der CD. Dafür in APE behoben (gcc-Branch, Patch 0022): lib9ps „file not found“ war kein ENOENT; gcc in `/tmp` (ramfs) brach beim Suchen der Header ab.
+## 2026-11-04: 9front-gcc's out rebuilt, CD with cgo
+- 9front-gcc's `out/{amd64,386,arm64}` rebuilt (against today's gcc branch); native.sh now takes `out` instead of `out-gcc`: amd64, 386 and arm64 7/7 each. The old compat headers (`$target/include`, `libapecompat.a`, leftovers of installations from before 22.10.) removed from `out/{amd64,386}`.
+- Install CD amd64 with this Go and gcc: tests/go in the gcc branch 7/7, including cgo with the CD's gcc. For that, fixed in APE (gcc branch, patch 0022): lib9ps „file not found“ was not an ENOENT; gcc in `/tmp` (ramfs) aborted when searching for the headers.
 
-## 2026-11-04: Go unter NIX (../9front-nix)
-- `tests/nix.sh`: der nix-Kernel (Branch nix, auf den heutigen gcc rebased) mit `*nixac=1` von 4 CPUs; die Programme von tests/prog laufen normal (TC) und per `execac -c 3` auf dem AC, dazu `tests/nix/core.go` (Kern jedes Procs aus `/proc/n/core`). amd64 22/22, arm64 22/22 (TCG, 9qemu.u von build-boot.sh neu gemacht, sonst bootet der alte Kernel). Gos Haupt-Proc läuft auf dem AC (`core main 3`), die Procs, die Go per rfork macht, auf den TCs (`core other 0`): NIX startet ein Kind eines AC-Prozesses auf einem TC. Gos `NumCPU` zählt die Zeilen von `/dev/sysstat`, also auch den AC (4). Keine Änderung an Go nötig.
-- Falle: guest.sh bricht nach 600 s ab und gibt dann nichts aus; jedes Programm zweimal dauert länger (`GUEST_TIMEOUT` 1800 in nix.sh).
-- `tests/nix/acgo.go` (in tests/nix.sh, nur auf einem TC): eine Goroutine holt sich ohne execac und ohne Änderung an Go den AC — `runtime.LockOSThread`, dann `rfork(RFCORE|RFCPREPAGE)` per `syscall.Syscall(SYS_RFORK, …)`; sie rechnet dort (main sieht sie von einem TC aus auf dem AC, ein GC läuft), ein zweites RFCORE scheitert („no free application core“), `rfork(RFCCORE)` bringt sie zurück. ~2000 Hin- und Rückwege in 2 s Rechnen (Gos Zeitabfragen, Seiten). **RFCPREPAGE nötig**: Go reserviert die Heap-Arenen per brk (Bss bis 0x4c000000, ~1,2 GB), Prepage hätte alles angelegt. amd64 23/23, arm64 23/23 (dort ~420 Hin- und Rückwege).
-- **Zwei NIX-Fehler damit gefunden, auf `nix` behoben**: (1) eine Note, die runacores Schlaf unterbrach, ging verloren, wenn der AC gerade mit einem Systemaufruf herauskam (Gos exit: `go: exit` an den AC-Proc auf dem Weg in semacquire → hing für immer; `execac … note` hing so beim 4. Durchgang). (2) `rfork(RFCORE)` legte die ganze dünne Bss an, der Kernel tötete den Prozess; jetzt RFCORE|RFCPREPAGE ohne Prepage, und Prepage hört bei knappem Speicher auf.
+## 2026-11-04: Go under NIX (../9front-nix)
+- `tests/nix.sh`: the nix kernel (branch nix, rebased onto today's gcc) with `*nixac=1` of 4 CPUs; the programs of tests/prog run normally (TC) and via `execac -c 3` on the AC, plus `tests/nix/core.go` (core of each proc from `/proc/n/core`). amd64 22/22, arm64 22/22 (TCG, 9qemu.u remade by build-boot.sh, otherwise the old kernel boots). Go's main proc runs on the AC (`core main 3`), the procs Go makes by rfork on the TCs (`core other 0`): NIX starts a child of an AC process on a TC. Go's `NumCPU` counts the lines of `/dev/sysstat`, so the AC too (4). No change to Go needed.
+- Pitfall: guest.sh aborts after 600 s and then prints nothing; running each program twice takes longer (`GUEST_TIMEOUT` 1800 in nix.sh).
+- `tests/nix/acgo.go` (in tests/nix.sh, only on a TC): a goroutine gets the AC without execac and without a change to Go — `runtime.LockOSThread`, then `rfork(RFCORE|RFCPREPAGE)` via `syscall.Syscall(SYS_RFORK, …)`; it computes there (main sees it on the AC from a TC, a GC runs), a second RFCORE fails („no free application core“), `rfork(RFCCORE)` brings it back. ~2000 round trips in 2 s of computing (Go's time queries, pages). **RFCPREPAGE needed**: Go reserves the heap arenas via brk (bss up to 0x4c000000, ~1.2 GB), prepage would have allocated everything. amd64 23/23, arm64 23/23 (~420 round trips there).
+- **Two NIX bugs found with it, fixed on `nix`**: (1) a note that interrupted runacore's sleep was lost if the AC was just returning from a system call (Go's exit: `go: exit` to the AC proc on its way into semacquire → hung forever; `execac … note` hung that way on the 4th pass). (2) `rfork(RFCORE)` allocated the whole thin bss, the kernel killed the process; now RFCORE|RFCPREPAGE without prepage, and prepage stops when memory is short.
 
-## 2026-11-05: rc-Funktionen in /env, Exit-Meldung ohne Quotes (Patch 0006)
-Gefunden mit `../9front-mcp` (MCP-Server, der rc-Befehle startet); beide Stellen sind Gos eigener Code, upstream ebenso.
-- **Umgebung**: `syscall/exec_plan9.go` schrieb jedem Wert eine NUL an. Für Variablen stimmt das (rc: jedes Wort mit NUL; goenvs nimmt die letzte weg), aber eine Funktion (`fn#name`) ist rc-Quelltext, den rc mit `. -bq` liest → in jedem rc, das Go startete, `/env/fn#sigexit:1: syntax error`. `envValue` schreibt beides wie rc, für fork/exec und `syscall.Exec` gleich (Exec schrieb gar keine NUL). Falle beim ersten Versuch: rc lässt nach `fn x` eine **leere** `/env/fn#x` stehen → 0 Bytes; ein nil-Zeiger beim pwrite gibt auch bei Länge 0 `sys: bad address in syscall` (jeder Start eines Kindes starb, tests/prog/files auch) → Puffer mit Kapazität ≥ 1.
-- **Exit-Meldung**: `Waitmsg.Msg` behielt das `%q` des Kernels (`'rc 123: it''s'`, nur `''` wurde zu ""). Jetzt die Meldung selbst wie libcs wait (tokenize), `ExitError.Error()` = `exit status: rc 123: it's`. **Bewusst anders als upstream**: dessen `TestExitStatus` erwartete die Quotes (angepasst). Jedes Go-Programm, das mit diesem Go gebaut wird, sieht die Meldung ohne Quotes; Code, der selbst entquotet, bleibt richtig, solange er ungequotete Meldungen durchlässt. Bei einem neuen Go-Release muss der Patch mit. `cmd/vendor/golang.org/x/sys/plan9` hat dieselbe Stelle noch (vendored, nur von cmd benutzt).
-- **Nicht behoben, schon vorher so**: nach `syscall.Exec` laufen die übrigen Procs des Go-Programms weiter (Semacquire, für immer) und halten geerbte fds offen — ein Elternteil, der aus einer Pipe liest, sieht kein EOF. Exec ersetzt nur den aufrufenden Proc; die anderen müssten vorher beendet werden.
-- `tests/prog/rcenv.go` (run.sh startet es aus einem rc mit Funktion, Liste und gelöschter Funktion): Kind-rc über os/exec und syscall.Exec, Env aus Go, Exit-Meldung mit Quote darin, Erfolg = "". amd64 11/11.
+## 2026-11-05: rc functions in /env, exit message without quotes (patch 0006)
+Found with `../9front-mcp` (MCP server that starts rc commands); both places are Go's own code, upstream too.
+- **Environment**: `syscall/exec_plan9.go` appended a NUL to every value. For variables that is right (rc: each word with NUL; goenvs drops the last one), but a function (`fn#name`) is rc source text that rc reads with `. -bq` → in every rc that Go started, `/env/fn#sigexit:1: syntax error`. `envValue` writes both like rc, the same for fork/exec and `syscall.Exec` (Exec wrote no NUL at all). Pitfall of the first attempt: after `fn x` rc leaves an **empty** `/env/fn#x` → 0 bytes; a nil pointer in pwrite gives `sys: bad address in syscall` even with length 0 (every start of a child died, tests/prog/files too) → buffer with capacity ≥ 1.
+- **Exit message**: `Waitmsg.Msg` kept the kernel's `%q` (`'rc 123: it''s'`, only `''` became ""). Now the message itself like libc's wait (tokenize), `ExitError.Error()` = `exit status: rc 123: it's`. **Deliberately different from upstream**: its `TestExitStatus` expected the quotes (adapted). Every Go program built with this Go sees the message without quotes; code that unquotes itself stays correct as long as it lets unquoted messages through. With a new Go release the patch has to come along. `cmd/vendor/golang.org/x/sys/plan9` still has the same place (vendored, used only by cmd).
+- **Not fixed, already like this before**: after `syscall.Exec` the remaining procs of the Go program keep running (Semacquire, forever) and keep inherited fds open — a parent reading from a pipe sees no EOF. Exec replaces only the calling proc; the others would have to be ended beforehand.
+- `tests/prog/rcenv.go` (run.sh starts it from an rc with a function, a list and a deleted function): child rc via os/exec and syscall.Exec, env from Go, exit message with a quote in it, success = "". amd64 11/11.

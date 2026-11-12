@@ -5,7 +5,7 @@ Go for 9front (Plan 9): `plan9/amd64`, `plan9/386` (Go's own ports) and `plan9/a
 9front tree, branch `gcc` (`../9front-gccwt`). Programs are a.out, as from 6l/8l/7l, and
 run on 9front as well.
 
-Log of the port (German): `NOTES.md`.
+Log of the port: `NOTES.md`.
 
 ## Layout
 
