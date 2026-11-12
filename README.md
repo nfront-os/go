@@ -9,8 +9,9 @@ Log of the port (German): `NOTES.md`.
 
 ## Layout
 
-- `go/`: the Go sources (go1.27.3), its own git repository (ignored here); the port is on
-  its branch `plan9` (`git -C go log go1.27.3..plan9`).
+- `go/`: the Go sources: the release archive go1.27.3.src.tar.gz (`fetch.sh`: `sources.txt`,
+  `sha256.txt`, Google's key in `keys/`) as a repository of its own (ignored here), the
+  release tagged `go1.27.3`; the port is on its branch `plan9` (`git -C go log go1.27.3..plan9`).
 - `patches/go/`: that branch as patches (`scripts/patches.sh` writes them after a commit in
   `go/`); this repository holds the port through them.
 - `scripts/build.sh`: the host toolchain (`go/src/make.bash`, bootstrapped with the host's
@@ -23,8 +24,7 @@ Log of the port (German): `NOTES.md`.
 
 ## Build
 
-    git clone --depth 1 --branch go1.27.3 https://go.googlesource.com/go go
-    git -C go switch -c plan9 && git -C go am $PWD/patches/go/*.patch
+    ./fetch.sh                               # go1.27.3's release archive (signature, sha256) -> go/, patches on branch plan9
     objtype=amd64 scripts/build.sh           # 386, arm64: HOST=0 skips the host toolchain
     objtype=amd64 scripts/install.sh
 

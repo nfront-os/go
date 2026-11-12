@@ -28,8 +28,9 @@ mkdir -p "$D/bin" "$D/pkg/tool/plan9_$A"
 (cd "$TOP/go" && git ls-files -z -- src lib misc api go.env VERSION LICENSE PATENTS |
 	tar -c --null -T - -f -) | tar -x -C "$D" -f -
 # and what cmd/dist generated (zversion.go, zbootstrap.go, zdefaultcc.go, the tzdata's
-# zzipdata.go), as Go's own distributions have them
-(cd "$TOP/go" && git ls-files -z -o -i --exclude-standard -- src | grep -z '\.go$' |
+# zzipdata.go), as Go's own distributions have them: the untracked .go files (go/ is
+# the release archive as a repository, without Go's .gitignore)
+(cd "$TOP/go" && git ls-files -z -o -- src | grep -z '\.go$' |
 	tar -c --null -T - -f -) | tar -x -C "$D" -f -
 # the assembler's headers (textflag.h, funcdata.h, asm_ppc64x.h), from cmd/dist
 cp -r "$TOP/go/pkg/include" "$D/pkg/"
