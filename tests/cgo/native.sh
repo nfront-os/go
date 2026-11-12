@@ -6,9 +6,10 @@
 # usage: [objtype=386|arm64] tests/cgo/native.sh
 set -e
 TOP=$(cd "$(dirname "$0")/../.." && pwd)
+. "$TOP/scripts/nfront-paths.sh"	# TREE, TREE_GCC, GCC_DIR, ... (the distribution's paths.env)
 A=${objtype:-amd64}
-P=$(cd "${PLAN9:-$TOP/../9front-gccwt}" && pwd)
-G=${GCC_OUT:-$TOP/../9front-gcc/out/$A}/$A/gnu
+P=$(cd "${PLAN9:-$TREE_GCC}" && pwd)
+G=${GCC_OUT:-$GCC_DIR/out/$A}/$A/gnu
 D=$TOP/out/$A/$A/go
 [ -x "$D/bin/go" ] || { echo "cgo/native.sh: no $D: objtype=$A scripts/install.sh" >&2; exit 1; }
 [ -x "$G/bin/gcc" ] || { echo "cgo/native.sh: no $G/bin/gcc (../9front-gcc: build.sh native)" >&2; exit 1; }
