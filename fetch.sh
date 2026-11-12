@@ -8,6 +8,9 @@
 set -e
 cd "$(dirname "$0")"
 mkdir -p dl/sig
+# git am needs a committer; without a git identity (a new machine) a neutral one: the
+# branches are local, each commit keeps its author from the patch
+git config user.email >/dev/null 2>&1 || export GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-nfront} GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-nfront@localhost}
 while IFS=$'\t' read -r name url key; do
 	case $name in ''|\#*) continue ;; esac
 	f=dl/$(basename "$url")
