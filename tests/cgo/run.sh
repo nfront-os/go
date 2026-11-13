@@ -16,7 +16,7 @@ arm64)	X=aarch64-pc-plan9 ;;
 *)	echo "cgo/run.sh: objtype=$A: no cross gcc" >&2; exit 1 ;;
 esac
 CC=$GCC9BUILD/$A/cross/bin/$X-gcc
-[ -x "$CC" ] || { echo "cgo/run.sh: no $CC (../9front-gcc: build.sh cross)" >&2; exit 1; }
+[ -x "$CC" ] || { echo "cgo/run.sh: no $CC (GCC_DIR: toolchain/gcc, build.sh cross)" >&2; exit 1; }
 export GOCACHE=$TOP/build/gocache	# scripts/build.sh's
 B=$TOP/build/cgo-$A
 rm -rf "$B"; mkdir -p "$B"
