@@ -2,7 +2,8 @@
 
 Go for 9front (Plan 9): `plan9/amd64`, `plan9/386` (Go's own ports) and `plan9/arm64`
 (new here: Go has no Plan 9 port for arm64), cross-compiled on Linux, for the gcc-built
-9front tree, branch `gcc` (`../9front-gccwt`). Programs are a.out, as from 6l/8l/7l, and
+9front tree (`TREE` of nfront's `dist/paths.env`, branch `main`; the tests take another
+with `PLAN9=`). Programs are a.out, as from 6l/8l/7l, and
 run on 9front as well.
 
 Log of the port: `NOTES.md`.
@@ -66,5 +67,5 @@ APE's `_privates[1]`. 386 cross: `i686-pc-plan9-gcc`, `GOARCH=386`; arm64: `aarc
     tests/cgo/native.sh                 # the same, built by go and gcc in the guest
     tests/nix.sh                        # ../9front-nix (application cores): tests/prog on a TC and through execac on the AC
 
-To put the tree on the install CD: `GO_OUT=../9front-go/out/amd64` for
-`../9front-gccwt`'s `scripts/guest/mkiso.sh`; its `tests/run.sh go` checks Go on that CD.
+On the install CD: `dist/bin/mkcd -dev go PROFILE` (or `GO_OUT=$GO_DIR/out/amd64` for
+the tree's `scripts/guest/mkiso.sh`); the tree's `tests/run.sh go` checks Go on that CD.
